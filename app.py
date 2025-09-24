@@ -105,6 +105,16 @@ def extract_category_keywords(item_text, category):
                 found_keywords.append(product_type)
         return ', '.join(found_keywords) if found_keywords else None
     
+    if category_lower == 'preroll':
+        found_keywords = []
+        preroll_types = ['blunts', 'preroll', 'prerolls', 'joints', 'mini']
+        for preroll_type in preroll_types:
+            if preroll_type in item_str:
+                found_keywords.append(preroll_type)
+        if 'infused' in item_str:
+            found_keywords.append('infused')
+        return ', '.join(found_keywords) if found_keywords else None
+    
     return None
 
 def extract_pack_size_from_item(item_text):
@@ -125,24 +135,6 @@ def extract_pack_size_from_item(item_text):
             return match.group(1).lower()
     
     return None
-
-def extract_preroll_keywords(item_text):
-    """Extract preroll-specific keywords from item text"""
-    if pd.isna(item_text):
-        return None
-    
-    item_str = str(item_text).lower()
-    found_keywords = []
-    
-    preroll_types = ['blunts', 'preroll', 'prerolls', 'joints', 'mini']
-    for preroll_type in preroll_types:
-        if preroll_type in item_str:
-            found_keywords.append(preroll_type)
-    
-    if 'infused' in item_str:
-        found_keywords.append('infused')
-    
-    return ', '.join(found_keywords) if found_keywords else None
 
 def extract_gid_from_url(sheet_url):
     """Extract the gid (worksheet ID) from a Google Sheets URL"""
@@ -276,6 +268,15 @@ def filter_company_products(df, connect_catalog_df=None):
     data_source_name = "Company Products"
     st.write(f"**{data_source_name}** - Original data shape: {df.shape}")
     
+    # Diagnostic: Check for .5g Stiiizy products and their Unit Price
+    if 'Item' in df.columns and 'Unit Price' in df.columns and 'Brand' in df.columns:
+        stiiizy_half_g = df[(df['Brand'] == 'Stiiizy') & (df['Item'].str.contains('.5g', case=False, na=False))]
+        if len(stiiizy_half_g) > 0:
+            st.write(f"🔍 **Debug: Found {len(stiiizy_half_g)} Stiiizy .5g products**")
+            st.write("**Sample Unit Prices for Stiiizy .5g:**")
+            for idx, row in stiiizy_half_g.head(5).iterrows():
+                st.write(f"  • {row['Item']}: Unit Price = '{row['Unit Price']}' (type: {type(row['Unit Price']).__name__})")
+    
     if 'Active' in df.columns:
         df['Active'] = df['Active'].astype(str).str.strip()
         active_df = df[~df['Active'].isin(['No', 'False', 'no', 'false', 'NO', 'FALSE', 'N', 'n'])]
@@ -348,20 +349,25 @@ def filter_company_products(df, connect_catalog_df=None):
         lambda row: extract_category_keywords(row['Item'], row['Category']), axis=1
     )
     
-    preroll_mask = filtered_df['Category'] == 'Preroll'
-    filtered_df['Extracted_Preroll_Keywords'] = None
-    if preroll_mask.any():
-        filtered_df.loc[preroll_mask, 'Extracted_Preroll_Keywords'] = filtered_df.loc[preroll_mask, 'Item'].apply(extract_preroll_keywords)
-    
     weight_extracted_count = filtered_df['Extracted_Weight'].notna().sum()
     pack_extracted_count = filtered_df['Extracted_Pack_Size'].notna().sum()
     keywords_extracted_count = filtered_df['Extracted_Category_Keywords'].notna().sum()
-    preroll_keywords_extracted_count = filtered_df['Extracted_Preroll_Keywords'].notna().sum() if preroll_mask.any() else 0
+    
     st.info(f"🔍 Extracted weights from {weight_extracted_count:,} products")
     st.info(f"📦 Extracted pack sizes from {pack_extracted_count:,} products")
     st.info(f"🔤 Extracted category keywords from {keywords_extracted_count:,} products")
-    if preroll_keywords_extracted_count > 0:
-        st.info(f"🚬 Extracted preroll keywords from {preroll_keywords_extracted_count:,} preroll products")
+    
+    # Show keyword extraction breakdown by category
+    if keywords_extracted_count > 0:
+        st.write("**📊 Keyword Extraction by Category:**")
+        for category in filtered_df['Category'].unique():
+            if pd.notna(category):
+                category_mask = filtered_df['Category'] == category
+                category_keywords = filtered_df[category_mask]['Extracted_Category_Keywords'].notna().sum()
+                category_total = category_mask.sum()
+                if category_keywords > 0:
+                    percentage = (category_keywords / category_total * 100)
+                    st.write(f"• **{category}**: {category_keywords:,} / {category_total:,} products ({percentage:.1f}%)")
     
     st.write(f"**{data_source_name}** - Final filtered data shape: {filtered_df.shape}")
     
@@ -758,17 +764,17 @@ def add_smart_brand_matching(company_df, catalog_df):
                             current_templates = no_pack_templates
                             match_steps.append("no pack (partial fallback)")
                     
-                    company_preroll_keywords = row.get('Extracted_Preroll_Keywords')
-                    if company_preroll_keywords and len(current_templates) > 1:
-                        company_preroll_keyword_list = [kw.strip() for kw in str(company_preroll_keywords).split(',')]
-                        company_type_keywords = [kw for kw in company_preroll_keyword_list if kw != 'infused']
+                    company_keywords = row.get('Extracted_Category_Keywords')
+                    if company_keywords and len(current_templates) > 1:
+                        company_keyword_list = [kw.strip() for kw in str(company_keywords).split(',')]
+                        company_type_keywords = [kw for kw in company_keyword_list if kw != 'infused']
                         
                         if company_type_keywords:
                             template_scores = []
                             for template in current_templates:
-                                catalog_preroll_keywords = extract_preroll_keywords(template)
-                                if catalog_preroll_keywords:
-                                    catalog_keyword_list = [kw.strip() for kw in catalog_preroll_keywords.split(',')]
+                                catalog_keywords = extract_category_keywords(template, category)
+                                if catalog_keywords:
+                                    catalog_keyword_list = [kw.strip() for kw in catalog_keywords.split(',')]
                                     catalog_type_keywords = [kw for kw in catalog_keyword_list if kw != 'infused']
                                     matches = sum(1 for ck in company_type_keywords if ck in catalog_type_keywords)
                                     template_scores.append((template, matches, len(catalog_type_keywords), catalog_type_keywords))
