@@ -254,7 +254,42 @@ def load_google_sheet_data(sheet_url, worksheet_name=None):
 def load_csv_data(uploaded_file):
     """Load data from uploaded CSV file"""
     try:
+        # Read first to see the structure
+        uploaded_file.seek(0)
+        df_test = pd.read_csv(uploaded_file, nrows=5)
+        st.write("🔍 **Debug: First 5 rows with NO skiprows:**")
+        st.dataframe(df_test)
+        
+        # Now read with skiprows=1
+        uploaded_file.seek(0)
         df = pd.read_csv(uploaded_file, skiprows=1)
+        st.write("🔍 **Debug: First 5 rows WITH skiprows=1:**")
+        st.dataframe(df.head())
+        
+        # Check for Stiiizy pods specifically right after load
+        if 'Brand' in df.columns and 'Item' in df.columns and 'Unit Price' in df.columns:
+            # Look for the specific pattern: "Stiiizy - STRAIN Pod .5g"
+            stiiizy_pods = df[(df['Brand'] == 'Stiiizy') & 
+                             (df['Item'].str.contains('Pod.*\.5g', case=False, na=False, regex=True))].head(10)
+            
+            if len(stiiizy_pods) > 0:
+                st.write(f"🔍 **Debug: Found {len(stiiizy_pods)} Stiiizy Pod .5g products RIGHT AFTER CSV LOAD:**")
+                st.dataframe(stiiizy_pods[['Brand', 'Item', 'Unit Price', 'Unit Sale Price']])
+            else:
+                # Fallback: look for any Stiiizy with .5g
+                stiiizy_any = df[(df['Brand'] == 'Stiiizy') & 
+                               (df['Item'].str.contains('\.5g', case=False, na=False, regex=True))].head(10)
+                if len(stiiizy_any) > 0:
+                    st.write(f"🔍 **Debug: Found {len(stiiizy_any)} Stiiizy .5g products (any type) RIGHT AFTER CSV LOAD:**")
+                    st.dataframe(stiiizy_any[['Brand', 'Item', 'Unit Price', 'Unit Sale Price']])
+                else:
+                    st.write("🔍 **Debug: No Stiiizy .5g products found after CSV load**")
+                    # Show all Stiiizy products to see what we do have
+                    all_stiiizy = df[df['Brand'] == 'Stiiizy'].head(5)
+                    if len(all_stiiizy) > 0:
+                        st.write("🔍 **Debug: All Stiiizy products found:**")
+                        st.dataframe(all_stiiizy[['Brand', 'Item', 'Unit Price']])
+        
         return df, "Company Products"
     except Exception as e:
         st.error(f"Error loading CSV file: {str(e)}")
