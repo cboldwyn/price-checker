@@ -1,7 +1,11 @@
+"""
+Product Price Checker v4.0
+Smart brand matching and price comparison tool for cannabis retail products
+"""
+
 import streamlit as st
 import pandas as pd
 import io
-import json
 import re
 from google.oauth2.service_account import Credentials
 import gspread
@@ -9,12 +13,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Configure page
 st.set_page_config(
-    page_title="Product Price Checker",
+    page_title="Product Price Checker v4.0",
     page_icon="🛒",
     layout="wide"
 )
 
-# Default Google Sheets URLs
+# Configuration
+VERSION = "4.0"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -30,6 +35,14 @@ SHOP_NAME_MAPPING = {
     'HAVEN - Orange County': 'Stanton',
     'HAVEN - Fresno': 'Fresno',
     'Haven - Corona': 'Corona'
+}
+
+# Exact match brands that require product-level matching
+EXACT_PRODUCT_MATCH_BRANDS = {
+    'Blazy Susan', 'Camino', 'Crave', 'Daily Dose', "Dr. Norm's", 'Good Tide', 
+    'Happy Fruit', 'High Gorgeous', 'Kiva', 'Lost Farm', 'Made From Dirt', 
+    'Papa & Barkley', 'Sip Elixirs', 'St. Ides', "Uncle Arnie's", 'Vet CBD', 
+    'Wyld', 'Yummi Karma', "Not Your Father's"
 }
 
 def extract_weight_from_item(item_text):
@@ -54,69 +67,6 @@ def extract_weight_from_item(item_text):
     
     return None
 
-def extract_category_keywords(item_text, category):
-    """Extract category-specific distinguishing keywords from item text"""
-    if pd.isna(item_text) or pd.isna(category):
-        return None
-    
-    item_str = str(item_text).lower()
-    category_lower = str(category).lower()
-    
-    if category_lower == 'vape':
-        vape_keywords = ['originals', 'ascnd', 'dna', 'exotics', 'disposable', 'live resin', 'reload', 'rtu', 'curepen', 'curebar']
-        found_keywords = []
-        for keyword in vape_keywords:
-            if keyword in item_str:
-                found_keywords.append(keyword)
-        return ', '.join(found_keywords) if found_keywords else None
-    
-    if 'flower' in category_lower:
-        quality_tiers = ['top shelf', 'headstash', 'exotic', 'premium', 'private reserve', 'reserve']
-        found_keywords = []
-        for tier in quality_tiers:
-            if tier in item_str:
-                found_keywords.append(tier)
-        return ', '.join(found_keywords) if found_keywords else None
-    
-    if category_lower == 'extract':
-        found_keywords = []
-        if 'live rosin' in item_str:
-            found_keywords.append('live rosin')
-        elif 'live resin' in item_str:
-            found_keywords.append('live resin')
-        elif 'hash rosin' in item_str:
-            found_keywords.append('hash rosin')
-        elif 'rosin' in item_str:
-            found_keywords.append('rosin')
-        elif 'resin' in item_str:
-            found_keywords.append('resin')
-        if any(brand in item_str for brand in ['bear labs', 'west coast cure']):
-            tier_match = re.search(r'tier\s*([1-4])', item_str)
-            if tier_match:
-                found_keywords.append(f"tier {tier_match.group(1)}")
-        for modifier in ['cold cure', 'fresh press', 'curated', 'hte blend', 'dino eggz']:
-            if modifier in item_str:
-                found_keywords.append(modifier)
-        for consistency in ['diamonds', 'budder', 'badder', 'sauce', 'sugar', 'jam']:
-            if consistency in item_str:
-                found_keywords.append(consistency)
-        for product_type in ['rso', 'syringe']:
-            if product_type in item_str:
-                found_keywords.append(product_type)
-        return ', '.join(found_keywords) if found_keywords else None
-    
-    if category_lower == 'preroll':
-        found_keywords = []
-        preroll_types = ['blunts', 'preroll', 'prerolls', 'joints', 'mini']
-        for preroll_type in preroll_types:
-            if preroll_type in item_str:
-                found_keywords.append(preroll_type)
-        if 'infused' in item_str:
-            found_keywords.append('infused')
-        return ', '.join(found_keywords) if found_keywords else None
-    
-    return None
-
 def extract_pack_size_from_item(item_text):
     """Extract pack size from item text (e.g., "OG Kush 3pk 1.5g" → "3pk")"""
     if pd.isna(item_text):
@@ -136,6 +86,74 @@ def extract_pack_size_from_item(item_text):
     
     return None
 
+def extract_category_keywords(item_text, category):
+    """Extract category-specific distinguishing keywords from item text"""
+    if pd.isna(item_text) or pd.isna(category):
+        return None
+    
+    item_str = str(item_text).lower()
+    category_lower = str(category).lower()
+    
+    if category_lower == 'vape':
+        vape_keywords = ['originals', 'ascnd', 'dna', 'exotics', 'disposable', 'live resin', 'reload', 'rtu', 'curepen', 'curebar']
+        found_keywords = [keyword for keyword in vape_keywords if keyword in item_str]
+        return ', '.join(found_keywords) if found_keywords else None
+    
+    if 'flower' in category_lower:
+        quality_tiers = ['top shelf', 'headstash', 'exotic', 'premium', 'private reserve', 'reserve']
+        found_keywords = [tier for tier in quality_tiers if tier in item_str]
+        return ', '.join(found_keywords) if found_keywords else None
+    
+    if category_lower == 'extract':
+        found_keywords = []
+        
+        # Primary extract types (hierarchical)
+        if 'live rosin' in item_str:
+            found_keywords.append('live rosin')
+        elif 'live resin' in item_str:
+            found_keywords.append('live resin')
+        elif 'hash rosin' in item_str:
+            found_keywords.append('hash rosin')
+        elif 'rosin' in item_str:
+            found_keywords.append('rosin')
+        elif 'resin' in item_str:
+            found_keywords.append('resin')
+        
+        # Brand-specific tiers
+        if any(brand in item_str for brand in ['bear labs', 'west coast cure']):
+            tier_match = re.search(r'tier\s*([1-4])', item_str)
+            if tier_match:
+                found_keywords.append(f"tier {tier_match.group(1)}")
+        
+        # Processing modifiers
+        modifiers = ['cold cure', 'fresh press', 'curated', 'hte blend', 'dino eggz']
+        found_keywords.extend([modifier for modifier in modifiers if modifier in item_str])
+        
+        # Consistency types
+        consistencies = ['diamonds', 'budder', 'badder', 'sauce', 'sugar', 'jam']
+        found_keywords.extend([consistency for consistency in consistencies if consistency in item_str])
+        
+        # Product types
+        product_types = ['rso', 'syringe']
+        found_keywords.extend([product_type for product_type in product_types if product_type in item_str])
+        
+        return ', '.join(found_keywords) if found_keywords else None
+    
+    if category_lower == 'preroll':
+        found_keywords = []
+        
+        # Preroll types
+        preroll_types = ['blunts', 'preroll', 'prerolls', 'joints', 'mini']
+        found_keywords.extend([preroll_type for preroll_type in preroll_types if preroll_type in item_str])
+        
+        # Special attributes
+        if 'infused' in item_str:
+            found_keywords.append('infused')
+        
+        return ', '.join(found_keywords) if found_keywords else None
+    
+    return None
+
 def extract_gid_from_url(sheet_url):
     """Extract the gid (worksheet ID) from a Google Sheets URL"""
     try:
@@ -148,12 +166,12 @@ def extract_gid_from_url(sheet_url):
             else:
                 gid = gid_part
             return int(gid)
-        return None
     except:
-        return None
+        pass
+    return None
 
 @st.cache_data
-def load_google_sheet_data(sheet_url, worksheet_name=None):
+def load_google_sheet_data(sheet_url):
     """Load data from Google Sheets using service account authentication"""
     try:
         credentials_dict = st.secrets["google_sheets"]
@@ -168,6 +186,7 @@ def load_google_sheet_data(sheet_url, worksheet_name=None):
         client = gspread.authorize(creds)
         sheet = client.open_by_url(sheet_url)
         
+        # Try to find worksheet by GID first
         gid = extract_gid_from_url(sheet_url)
         worksheet = None
         
@@ -177,54 +196,29 @@ def load_google_sheet_data(sheet_url, worksheet_name=None):
                     if ws.id == gid:
                         worksheet = ws
                         break
-                if worksheet:
-                    st.info(f"📋 Found worksheet by GID: {worksheet.title} (ID: {gid})")
-                else:
-                    st.warning(f"⚠️ Could not find worksheet with GID {gid}, using first worksheet")
+                if not worksheet:
                     worksheet = sheet.get_worksheet(0)
-            except Exception as e:
-                st.warning(f"⚠️ Error finding worksheet by GID: {str(e)}, using first worksheet")
+            except:
                 worksheet = sheet.get_worksheet(0)
-        elif worksheet_name:
-            worksheet = sheet.worksheet(worksheet_name)
         else:
             worksheet = sheet.get_worksheet(0)
         
-        st.write(f"🔍 **Debug:** Inspecting {worksheet.title} structure...")
-        
-        try:
-            raw_data = worksheet.get_all_values()
-            if raw_data:
-                st.write(f"🔍 **Debug:** Total rows in sheet: {len(raw_data)}")
-                st.write(f"🔍 **Debug:** Row 0 (should be title): {raw_data[0][:5] if len(raw_data[0]) > 5 else raw_data[0]}")
-                if len(raw_data) > 1:
-                    st.write(f"🔍 **Debug:** Row 1 (should be headers): {raw_data[1][:5] if len(raw_data[1]) > 5 else raw_data[1]}")
-                if len(raw_data) > 2:
-                    st.write(f"🔍 **Debug:** Row 2 (should be data): {raw_data[2][:5] if len(raw_data[2]) > 5 else raw_data[2]}")
-        except Exception as e:
-            st.error(f"Error inspecting raw data: {str(e)}")
-        
+        # Try different loading methods
         df = None
-        
         try:
             df = get_as_dataframe(worksheet, parse_dates=True, header=0)
-            st.info(f"✅ Loaded using header=0, shape: {df.shape}")
             if len(df.columns) > 0:
                 first_col = str(df.columns[0]).lower()
-                if first_col in ['status', 'active'] and 'retail price' in str(df.columns).lower():
-                    st.success("✅ Headers look correct - found expected column patterns")
-                elif first_col == 'active' and 'almora' in str(df.columns).lower():
-                    st.warning("⚠️ This looks like data as headers - trying alternative approach")
-                    df = None
-        except Exception as e:
-            st.warning(f"⚠️ header=0 failed: {str(e)}")
+                if first_col == 'active' and 'almora' in str(df.columns).lower():
+                    df = None  # This indicates headers are wrong
+        except:
+            pass
         
         if df is None or df.empty:
             try:
                 df = get_as_dataframe(worksheet, parse_dates=True, header=1)
-                st.info(f"✅ Loaded using header=1, shape: {df.shape}")
-            except Exception as e:
-                st.warning(f"⚠️ header=1 failed: {str(e)}")
+            except:
+                pass
         
         if df is None or df.empty:
             try:
@@ -233,18 +227,13 @@ def load_google_sheet_data(sheet_url, worksheet_name=None):
                     headers = all_values[0]
                     data_rows = all_values[1:]
                     df = pd.DataFrame(data_rows, columns=headers)
-                    st.info(f"✅ Loaded manually (row 0 as headers), shape: {df.shape}")
-            except Exception as e:
-                st.error(f"❌ Manual loading failed: {str(e)}")
+            except:
+                return None, None
         
         if df is not None:
-            st.write(f"🔍 **Debug:** Columns found: {list(df.columns)[:10]}{'...' if len(df.columns) > 10 else ''}")
-            original_shape = df.shape
             df = df.dropna(how='all').dropna(axis=1, how='all')
-            st.write(f"🔍 **Debug:** After cleanup: {original_shape} → {df.shape}")
             return df, worksheet.title
         else:
-            st.error("❌ Failed to load data with any method")
             return None, None
         
     except Exception as e:
@@ -254,42 +243,7 @@ def load_google_sheet_data(sheet_url, worksheet_name=None):
 def load_csv_data(uploaded_file):
     """Load data from uploaded CSV file"""
     try:
-        # Read first to see the structure
-        uploaded_file.seek(0)
-        df_test = pd.read_csv(uploaded_file, nrows=5)
-        st.write("🔍 **Debug: First 5 rows with NO skiprows:**")
-        st.dataframe(df_test)
-        
-        # Now read with skiprows=1
-        uploaded_file.seek(0)
         df = pd.read_csv(uploaded_file, skiprows=1)
-        st.write("🔍 **Debug: First 5 rows WITH skiprows=1:**")
-        st.dataframe(df.head())
-        
-        # Check for Stiiizy pods specifically right after load
-        if 'Brand' in df.columns and 'Item' in df.columns and 'Unit Price' in df.columns:
-            # Look for the specific pattern: "Stiiizy - STRAIN Pod .5g"
-            stiiizy_pods = df[(df['Brand'] == 'Stiiizy') & 
-                             (df['Item'].str.contains('Pod.*\.5g', case=False, na=False, regex=True))].head(10)
-            
-            if len(stiiizy_pods) > 0:
-                st.write(f"🔍 **Debug: Found {len(stiiizy_pods)} Stiiizy Pod .5g products RIGHT AFTER CSV LOAD:**")
-                st.dataframe(stiiizy_pods[['Brand', 'Item', 'Unit Price', 'Unit Sale Price']])
-            else:
-                # Fallback: look for any Stiiizy with .5g
-                stiiizy_any = df[(df['Brand'] == 'Stiiizy') & 
-                               (df['Item'].str.contains('\.5g', case=False, na=False, regex=True))].head(10)
-                if len(stiiizy_any) > 0:
-                    st.write(f"🔍 **Debug: Found {len(stiiizy_any)} Stiiizy .5g products (any type) RIGHT AFTER CSV LOAD:**")
-                    st.dataframe(stiiizy_any[['Brand', 'Item', 'Unit Price', 'Unit Sale Price']])
-                else:
-                    st.write("🔍 **Debug: No Stiiizy .5g products found after CSV load**")
-                    # Show all Stiiizy products to see what we do have
-                    all_stiiizy = df[df['Brand'] == 'Stiiizy'].head(5)
-                    if len(all_stiiizy) > 0:
-                        st.write("🔍 **Debug: All Stiiizy products found:**")
-                        st.dataframe(all_stiiizy[['Brand', 'Item', 'Unit Price']])
-        
         return df, "Company Products"
     except Exception as e:
         st.error(f"Error loading CSV file: {str(e)}")
@@ -300,26 +254,18 @@ def filter_company_products(df, connect_catalog_df=None):
     if df is None or df.empty:
         return None
     
-    data_source_name = "Company Products"
-    st.write(f"**{data_source_name}** - Original data shape: {df.shape}")
+    st.write(f"**Company Products** - Original data shape: {df.shape}")
     
-    # Diagnostic: Check for .5g Stiiizy products and their Unit Price
-    if 'Item' in df.columns and 'Unit Price' in df.columns and 'Brand' in df.columns:
-        stiiizy_half_g = df[(df['Brand'] == 'Stiiizy') & (df['Item'].str.contains('.5g', case=False, na=False))]
-        if len(stiiizy_half_g) > 0:
-            st.write(f"🔍 **Debug: Found {len(stiiizy_half_g)} Stiiizy .5g products**")
-            st.write("**Sample Unit Prices for Stiiizy .5g:**")
-            for idx, row in stiiizy_half_g.head(5).iterrows():
-                st.write(f"  • {row['Item']}: Unit Price = '{row['Unit Price']}' (type: {type(row['Unit Price']).__name__})")
-    
+    # Filter by Active status
     if 'Active' in df.columns:
         df['Active'] = df['Active'].astype(str).str.strip()
         active_df = df[~df['Active'].isin(['No', 'False', 'no', 'false', 'NO', 'FALSE', 'N', 'n'])]
-        st.write(f"**{data_source_name}** - After filtering by Active field: {active_df.shape}")
+        st.write(f"**Company Products** - After filtering by Active field: {active_df.shape}")
     else:
-        st.warning(f"No 'Active' column found in {data_source_name}. Using all data.")
+        st.warning("No 'Active' column found. Using all data.")
         active_df = df.copy()
     
+    # Exclude unwanted categories
     categories_to_exclude = [
         'Display', 'Clones', 'Apparel', 'Sample', 'Promo', 'Compassion', 
         'Donation', 'Boxes', 'Non-Cannabis', 'Gift Cards', 'xxxDONOTUSE-Buzzers'
@@ -330,12 +276,11 @@ def filter_company_products(df, connect_catalog_df=None):
         active_df = active_df[~active_df['Category'].isin(categories_to_exclude)]
         after_category_filter = len(active_df)
         removed_count = before_category_filter - after_category_filter
-        st.write(f"**{data_source_name}** - After excluding unwanted categories: {active_df.shape}")
+        st.write(f"**Company Products** - After excluding unwanted categories: {active_df.shape}")
         if removed_count > 0:
             st.info(f"🚫 Excluded {removed_count} products from categories: {', '.join(categories_to_exclude)}")
-    else:
-        st.warning(f"No 'Category' column found in {data_source_name}. Category filtering skipped.")
     
+    # Keep only essential columns
     columns_to_keep = [
         'Shop', 'SKU', 'Item', 'Category', 'Cannabis', 'Measurement',
         'Cost per Unit', 'Unit Price', 'Unit Sale Price', 'Product ID',
@@ -348,35 +293,28 @@ def filter_company_products(df, connect_catalog_df=None):
     missing_columns = [col for col in columns_to_keep if col not in active_df.columns]
     
     if missing_columns:
-        st.warning(f"**{data_source_name}** - Missing columns: {missing_columns}")
+        st.warning(f"Missing columns: {missing_columns}")
     
     filtered_df = active_df[existing_columns].copy()
-    st.write(f"**{data_source_name}** - After column filtering: {filtered_df.shape}")
+    st.write(f"**Company Products** - After column filtering: {filtered_df.shape}")
     
+    # Filter by valid brands from catalog
     if connect_catalog_df is not None and not connect_catalog_df.empty and 'Brand' in filtered_df.columns:
         if 'Brand' in connect_catalog_df.columns:
             valid_brands = connect_catalog_df['Brand'].dropna().unique()
             valid_brands = [str(brand).strip() for brand in valid_brands if str(brand).strip() and str(brand) != 'nan']
             
-            st.write(f"🔍 **Debug:** Found {len(valid_brands)} unique brands from Product Catalog: {valid_brands[:10]}{'...' if len(valid_brands) > 10 else ''}")
-            
             before_brand_filter = len(filtered_df)
             filtered_df = filtered_df[filtered_df['Brand'].isin(valid_brands)]
             after_brand_filter = len(filtered_df)
             
-            st.write(f"**{data_source_name}** - After brand filtering: {filtered_df.shape}")
+            st.write(f"**Company Products** - After brand filtering: {filtered_df.shape}")
             st.info(f"🎯 Filtered to only include {len(valid_brands)} brands from Product Catalog. Removed {before_brand_filter - after_brand_filter} products.")
-        else:
-            st.warning("⚠️ No 'Brand' column found in Product Catalog. Brand filtering skipped.")
-    elif connect_catalog_df is None:
-        st.info("📋 Product Catalog not loaded. Brand filtering skipped.")
-    elif connect_catalog_df.empty:
-        st.warning("⚠️ Product Catalog is empty. Brand filtering skipped.")
-    elif 'Brand' not in filtered_df.columns:
-        st.warning("⚠️ No 'Brand' column found in Company Products. Brand filtering skipped.")
     
-    filtered_df['Data_Source'] = data_source_name
+    # Add data source identifier
+    filtered_df['Data_Source'] = "Company Products"
     
+    # Extract enhanced matching data
     st.info("🔍 Extracting Weight, Pack Size, and Category Keywords for enhanced matching...")
     filtered_df['Extracted_Weight'] = filtered_df['Item'].apply(extract_weight_from_item)
     filtered_df['Extracted_Pack_Size'] = filtered_df['Item'].apply(extract_pack_size_from_item)
@@ -384,6 +322,7 @@ def filter_company_products(df, connect_catalog_df=None):
         lambda row: extract_category_keywords(row['Item'], row['Category']), axis=1
     )
     
+    # Show extraction stats
     weight_extracted_count = filtered_df['Extracted_Weight'].notna().sum()
     pack_extracted_count = filtered_df['Extracted_Pack_Size'].notna().sum()
     keywords_extracted_count = filtered_df['Extracted_Category_Keywords'].notna().sum()
@@ -404,8 +343,7 @@ def filter_company_products(df, connect_catalog_df=None):
                     percentage = (category_keywords / category_total * 100)
                     st.write(f"• **{category}**: {category_keywords:,} / {category_total:,} products ({percentage:.1f}%)")
     
-    st.write(f"**{data_source_name}** - Final filtered data shape: {filtered_df.shape}")
-    
+    st.write(f"**Company Products** - Final filtered data shape: {filtered_df.shape}")
     return filtered_df
 
 def add_catalog_location_mapping(df):
@@ -441,7 +379,6 @@ def normalize_categories(df):
     
     original_categories = df_copy['Category'].value_counts()
     df_copy['Category'] = df_copy['Category'].replace(flower_mapping)
-    updated_categories = df_copy['Category'].value_counts()
     
     normalized_count = 0
     for old_cat, new_cat in flower_mapping.items():
@@ -463,15 +400,13 @@ def add_smart_brand_matching(company_df, catalog_df):
     st.info("🧠 Starting smart brand structure matching...")
     
     matched_df = company_df.copy()
-    
     matched_df['Catalog_Match_Found'] = False
     matched_df['Catalog_Template'] = None
     matched_df['Match_Type'] = None
     matched_df['Match_Strategy'] = None
     matched_df['Match_Keywords'] = None
     
-    st.write("📊 Analyzing Product Catalog brand and category structure...")
-    
+    # Build brand and category mappings
     brand_catalog_map = {}
     brand_category_catalog_map = {}
     
@@ -490,6 +425,7 @@ def add_smart_brand_matching(company_df, catalog_df):
                 brand_category_catalog_map[brand_category_key] = []
             brand_category_catalog_map[brand_category_key].append(template)
     
+    # Categorize brands by complexity
     single_entry_brands = {}
     multiple_entry_brands = {}
     
@@ -507,25 +443,17 @@ def add_smart_brand_matching(company_df, catalog_df):
             single_entry_brand_categories[brand_category_key] = templates[0]
         else:
             multiple_entry_brand_categories[brand_category_key] = templates
-
-    EXACT_PRODUCT_MATCH_BRANDS = {
-        'Blazy Susan', 'Camino', 'Crave', 'Daily Dose', "Dr. Norm's", 'Good Tide', 
-        'Happy Fruit', 'High Gorgeous', 'Kiva', 'Lost Farm', 'Made From Dirt', 
-        'Papa & Barkley', 'Sip Elixirs', 'St. Ides', "Uncle Arnie's", 'Vet CBD', 
-        'Wyld', 'Yummi Karma', "Not Your Father's"
-    }
     
+    # Filter out exact match brands from auto-matching
     filtered_single_entry_brands = {brand: template for brand, template in single_entry_brands.items() 
                                   if brand not in EXACT_PRODUCT_MATCH_BRANDS}
     filtered_single_entry_brand_categories = {key: template for key, template in single_entry_brand_categories.items() 
                                             if key.split('|')[0] not in EXACT_PRODUCT_MATCH_BRANDS}
     
+    # Show matching strategy overview
     total_brands = len(brand_catalog_map)
     single_count = len(filtered_single_entry_brands)
     multiple_count = len(multiple_entry_brands)
-    
-    single_brand_category_count = len(filtered_single_entry_brand_categories)
-    multiple_brand_category_count = len(multiple_entry_brand_categories)
     
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -535,46 +463,7 @@ def add_smart_brand_matching(company_df, catalog_df):
     with col3:
         st.metric("🔀 Multiple Entry", multiple_count)
     
-    st.write(f"**📂 Brand + Category Analysis:**")
-    st.write(f"• **{len(filtered_single_entry_brand_categories)}** brand+category combinations have single catalog entries (auto-match)")
-    st.write(f"• **{multiple_brand_category_count}** brand+category combinations need specific rules")
-    st.write(f"• **{len(EXACT_PRODUCT_MATCH_BRANDS)}** exact-product-match brands (skip auto-matching)")
-    
-    if len(filtered_single_entry_brands) > 0:
-        st.write("**🎯 Sample Single Entry Brands (auto-match):**")
-        sample_single = list(filtered_single_entry_brands.items())[:3]
-        for brand, template in sample_single:
-            st.write(f"• **{brand}**: \"{template}\"")
-    
-    if len(filtered_single_entry_brand_categories) > 0:
-        st.write("**📂 Sample Single Brand+Category Combinations (auto-match):**")
-        sample_brand_categories = list(filtered_single_entry_brand_categories.items())[:3]
-        for brand_category_key, template in sample_brand_categories:
-            brand, category = brand_category_key.split('|')
-            st.write(f"• **{brand} + {category}**: \"{template}\"")
-    
-    if len(EXACT_PRODUCT_MATCH_BRANDS) > 0:
-        st.write("**🎯 Sample Exact Product Match Brands (exact matching only):**")
-        exact_brands_in_catalog = [brand for brand in list(EXACT_PRODUCT_MATCH_BRANDS)[:5] if brand in brand_catalog_map]
-        for brand in exact_brands_in_catalog:
-            entry_count = len(brand_catalog_map[brand])
-            st.write(f"• **{brand}**: {entry_count} catalog entries (exact match required)")
-    
-    if multiple_brand_category_count > 0:
-        st.write("**🔧 Sample Multi-Entry Brand+Category Combinations (need rules):**")
-        filtered_multiple = {key: templates for key, templates in multiple_entry_brand_categories.items() 
-                           if key.split('|')[0] not in EXACT_PRODUCT_MATCH_BRANDS}
-        sample_multiple = list(filtered_multiple.items())[:3]
-        for brand_category_key, templates in sample_multiple:
-            brand, category = brand_category_key.split('|')
-            st.write(f"• **{brand} + {category}**: {len(templates)} options")
-            for template in templates[:2]:
-                st.write(f"  - \"{template}\"")
-            if len(templates) > 2:
-                st.write(f"  - ... and {len(templates) - 2} more")
-    
-    st.write(f"\n🔍 Matching {len(matched_df):,} company products...")
-    
+    # Perform matching
     exact_matches = 0
     single_entry_matches = 0
     brand_category_matches = 0
@@ -584,7 +473,6 @@ def add_smart_brand_matching(company_df, catalog_df):
     no_matches = 0
     
     progress_bar = st.progress(0)
-    
     troubleshooting_data = []
     
     for counter, (idx, row) in enumerate(matched_df.iterrows()):
@@ -610,6 +498,7 @@ def add_smart_brand_matching(company_df, catalog_df):
         
         match_found = False
         
+        # 1. Try exact match
         if brand in brand_catalog_map:
             for template in brand_catalog_map[brand]:
                 if item.lower() == template.lower():
@@ -625,18 +514,17 @@ def add_smart_brand_matching(company_df, catalog_df):
                         'Shop': shop,
                         'Match_Status': 'Exact match',
                         'Catalog_Template': template,
-                        'Catalog_Options': f"{len(brand_catalog_map[brand])} options (all categories)",
-                        'Notes': 'Perfect match (case insensitive, category ignored)'
+                        'Catalog_Options': f"{len(brand_catalog_map[brand])} options",
+                        'Notes': 'Perfect match (case insensitive)'
                     })
                     break
         
-        if not match_found and brand in EXACT_PRODUCT_MATCH_BRANDS:
-            skip_auto_matching = True
-        else:
-            skip_auto_matching = False
+        # Skip auto-matching for exact product match brands
+        skip_auto_matching = brand in EXACT_PRODUCT_MATCH_BRANDS
         
-        if not match_found and not skip_auto_matching and brand in single_entry_brands:
-            template = single_entry_brands[brand]
+        # 2. Try single entry brand auto-match
+        if not match_found and not skip_auto_matching and brand in filtered_single_entry_brands:
+            template = filtered_single_entry_brands[brand]
             matched_df.at[idx, 'Catalog_Match_Found'] = True
             matched_df.at[idx, 'Catalog_Template'] = template
             matched_df.at[idx, 'Match_Type'] = 'brand_auto'
@@ -653,10 +541,11 @@ def add_smart_brand_matching(company_df, catalog_df):
                 'Notes': 'Auto-matched to only catalog option'
             })
         
-        if not match_found and not skip_auto_matching and brand in multiple_entry_brands:
+        # 3. Try brand+category auto-match
+        if not match_found and not skip_auto_matching:
             brand_category_key = f"{brand}|{category}"
-            if brand_category_key in single_entry_brand_categories:
-                template = single_entry_brand_categories[brand_category_key]
+            if brand_category_key in filtered_single_entry_brand_categories:
+                template = filtered_single_entry_brand_categories[brand_category_key]
                 matched_df.at[idx, 'Catalog_Match_Found'] = True
                 matched_df.at[idx, 'Catalog_Template'] = template
                 matched_df.at[idx, 'Match_Type'] = 'brand_category_auto'
@@ -673,275 +562,58 @@ def add_smart_brand_matching(company_df, catalog_df):
                     'Notes': f'Auto-matched to only {category} option for {brand}'
                 })
         
+        # 4. Try advanced weight/keyword matching for complex categories
         if not match_found and category in ['Flower', 'Preroll', 'Vape', 'Extract'] and brand in multiple_entry_brands:
             brand_category_key = f"{brand}|{category}"
             if brand_category_key in multiple_entry_brand_categories:
                 templates = multiple_entry_brand_categories[brand_category_key]
                 
+                # Advanced matching logic for different categories
+                matched_template = None
+                match_steps = []
+                
                 if category == 'Flower':
-                    company_weight = row.get('Extracted_Weight')
-                    
-                    current_templates = templates
-                    match_steps = []
-                    
-                    if company_weight:
-                        weight_matched_templates = []
-                        for template in current_templates:
-                            catalog_weight = extract_weight_from_item(template)
-                            if catalog_weight == company_weight:
-                                weight_matched_templates.append(template)
-                        
-                        if weight_matched_templates:
-                            current_templates = weight_matched_templates
-                            match_steps.append(f"weight: {company_weight}")
-                    
-                    company_keywords = row.get('Extracted_Category_Keywords')
-                    if company_keywords and len(current_templates) > 1:
-                        company_keyword_list = [kw.strip() for kw in str(company_keywords).split(',')]
-                        
-                        template_scores = []
-                        for template in current_templates:
-                            catalog_keywords = extract_category_keywords(template, category)
-                            if catalog_keywords:
-                                catalog_keyword_list = [kw.strip() for kw in catalog_keywords.split(',')]
-                                matches = sum(1 for ck in company_keyword_list if ck in catalog_keyword_list)
-                                template_scores.append((template, matches, len(catalog_keyword_list), catalog_keyword_list))
-                            else:
-                                template_scores.append((template, 0, 0, []))
-                        
-                        max_score = max(score for _, score, _, _ in template_scores)
-                        
-                        if max_score > 0:
-                            best_scored_templates = [(template, score, total_kw, kw_list) for template, score, total_kw, kw_list in template_scores if score == max_score]
-                            
-                            if len(best_scored_templates) == 1:
-                                current_templates = [best_scored_templates[0][0]]
-                                matched_keywords = [ck for ck in company_keyword_list if ck in best_scored_templates[0][3]]
-                                match_steps.append(f"keywords: {', '.join(matched_keywords)}")
-                            else:
-                                min_total_keywords = min(total_kw for _, _, total_kw, _ in best_scored_templates)
-                                final_candidates = [template for template, score, total_kw, kw_list in best_scored_templates if total_kw == min_total_keywords]
-                                
-                                if len(final_candidates) == 1:
-                                    current_templates = final_candidates
-                                    winner_keywords = [kw_list for template, score, total_kw, kw_list in best_scored_templates if template == final_candidates[0]][0]
-                                    matched_keywords = [ck for ck in company_keyword_list if ck in winner_keywords]
-                                    match_steps.append(f"keywords: {', '.join(matched_keywords)} (tiebreaker)")
-                    
-                    if len(current_templates) == 1:
-                        template = current_templates[0]
-                        matched_df.at[idx, 'Catalog_Match_Found'] = True
-                        matched_df.at[idx, 'Catalog_Template'] = template
-                        matched_df.at[idx, 'Match_Type'] = 'flower_weight_keywords'
-                        matched_df.at[idx, 'Match_Strategy'] = 'flower_weight_keywords'
-                        matched_df.at[idx, 'Match_Keywords'] = ', '.join(match_steps)
-                        flower_weight_matches += 1
-                        match_found = True
-                        troubleshooting_data.append({
-                            'Brand': brand,
-                            'Item': item,
-                            'Shop': shop,
-                            'Match_Status': 'Flower weight+keywords match',
-                            'Catalog_Template': template,
-                            'Catalog_Options': f"{len(templates)} total, 1 after filtering",
-                            'Notes': f'Matched by: {", ".join(match_steps)}'
-                        })
-                
+                    matched_template, match_steps = match_flower_products(row, templates)
                 elif category == 'Preroll':
-                    company_has_infused = 'infused' in str(item).lower()
-                    
-                    infused_filtered_templates = []
-                    for template in templates:
-                        template_has_infused = 'infused' in str(template).lower()
-                        if company_has_infused == template_has_infused:
-                            infused_filtered_templates.append(template)
-                    
-                    current_templates = infused_filtered_templates if infused_filtered_templates else templates
-                    match_steps = []
-                    if infused_filtered_templates:
-                        match_steps.append(f"infused: {'yes' if company_has_infused else 'no'}")
-                    
-                    company_weight = row.get('Extracted_Weight')
-                    if company_weight and len(current_templates) > 1:
-                        weight_matched_templates = []
-                        for template in current_templates:
-                            catalog_weight = extract_weight_from_item(template)
-                            if catalog_weight == company_weight:
-                                weight_matched_templates.append(template)
-                        
-                        if weight_matched_templates:
-                            current_templates = weight_matched_templates
-                            match_steps.append(f"weight: {company_weight}")
-                    
-                    company_pack = row.get('Extracted_Pack_Size')
-                    if company_pack and len(current_templates) > 1:
-                        pack_matched_templates = []
-                        for template in current_templates:
-                            catalog_pack = extract_pack_size_from_item(template)
-                            if catalog_pack == company_pack:
-                                pack_matched_templates.append(template)
-                        
-                        if pack_matched_templates:
-                            current_templates = pack_matched_templates
-                            match_steps.append(f"pack: {company_pack}")
-                    
-                    elif not company_pack and len(current_templates) > 1:
-                        no_pack_templates = []
-                        for template in current_templates:
-                            catalog_pack = extract_pack_size_from_item(template)
-                            if not catalog_pack:
-                                no_pack_templates.append(template)
-                        
-                        if len(no_pack_templates) == 1:
-                            current_templates = no_pack_templates
-                            match_steps.append("no pack (fallback)")
-                        elif len(no_pack_templates) > 0 and len(no_pack_templates) < len(current_templates):
-                            current_templates = no_pack_templates
-                            match_steps.append("no pack (partial fallback)")
-                    
-                    company_keywords = row.get('Extracted_Category_Keywords')
-                    if company_keywords and len(current_templates) > 1:
-                        company_keyword_list = [kw.strip() for kw in str(company_keywords).split(',')]
-                        company_type_keywords = [kw for kw in company_keyword_list if kw != 'infused']
-                        
-                        if company_type_keywords:
-                            template_scores = []
-                            for template in current_templates:
-                                catalog_keywords = extract_category_keywords(template, category)
-                                if catalog_keywords:
-                                    catalog_keyword_list = [kw.strip() for kw in catalog_keywords.split(',')]
-                                    catalog_type_keywords = [kw for kw in catalog_keyword_list if kw != 'infused']
-                                    matches = sum(1 for ck in company_type_keywords if ck in catalog_type_keywords)
-                                    template_scores.append((template, matches, len(catalog_type_keywords), catalog_type_keywords))
-                                else:
-                                    template_scores.append((template, 0, 0, []))
-                            
-                            max_score = max(score for _, score, _, _ in template_scores)
-                            
-                            if max_score > 0:
-                                best_scored_templates = [(template, score, total_kw, kw_list) for template, score, total_kw, kw_list in template_scores if score == max_score]
-                                
-                                if len(best_scored_templates) == 1:
-                                    current_templates = [best_scored_templates[0][0]]
-                                    matched_keywords = [ck for ck in company_type_keywords if ck in best_scored_templates[0][3]]
-                                    match_steps.append(f"type: {', '.join(matched_keywords)}")
-                                else:
-                                    min_total_keywords = min(total_kw for _, _, total_kw, _ in best_scored_templates)
-                                    final_candidates = [template for template, score, total_kw, kw_list in best_scored_templates if total_kw == min_total_keywords]
-                                    
-                                    if len(final_candidates) == 1:
-                                        current_templates = final_candidates
-                                        winner_keywords = [kw_list for template, score, total_kw, kw_list in best_scored_templates if template == final_candidates[0]][0]
-                                        matched_keywords = [ck for ck in company_type_keywords if ck in winner_keywords]
-                                        match_steps.append(f"type: {', '.join(matched_keywords)} (tiebreaker)")
-                    
-                    if len(current_templates) == 1:
-                        template = current_templates[0]
-                        matched_df.at[idx, 'Catalog_Match_Found'] = True
-                        matched_df.at[idx, 'Catalog_Template'] = template
-                        matched_df.at[idx, 'Match_Type'] = 'preroll_multi_step'
-                        matched_df.at[idx, 'Match_Strategy'] = 'preroll_multi_step'
-                        matched_df.at[idx, 'Match_Keywords'] = ', '.join(match_steps)
-                        preroll_matches += 1
-                        match_found = True
-                        troubleshooting_data.append({
-                            'Brand': brand,
-                            'Item': item,
-                            'Shop': shop,
-                            'Match_Status': 'Preroll multi-step match',
-                            'Catalog_Template': template,
-                            'Catalog_Options': f"{len(templates)} total, 1 after filtering",
-                            'Notes': f'Matched by: {", ".join(match_steps)}'
-                        })
-                
+                    matched_template, match_steps = match_preroll_products(row, templates)
                 elif category in ['Vape', 'Extract']:
-                    current_templates = templates
-                    match_steps = []
+                    matched_template, match_steps = match_vape_extract_products(row, templates, category)
+                
+                if matched_template:
+                    matched_df.at[idx, 'Catalog_Match_Found'] = True
+                    matched_df.at[idx, 'Catalog_Template'] = matched_template
+                    matched_df.at[idx, 'Match_Type'] = f'{category.lower()}_weight_keywords'
+                    matched_df.at[idx, 'Match_Strategy'] = f'{category.lower()}_weight_keywords'
+                    matched_df.at[idx, 'Match_Keywords'] = ', '.join(match_steps)
                     
-                    company_weight = row.get('Extracted_Weight')
-                    if company_weight and len(current_templates) > 1:
-                        weight_matched_templates = []
-                        for template in current_templates:
-                            catalog_weight = extract_weight_from_item(template)
-                            if catalog_weight == company_weight:
-                                weight_matched_templates.append(template)
-                        
-                        if weight_matched_templates:
-                            current_templates = weight_matched_templates
-                            match_steps.append(f"weight: {company_weight}")
-                    
-                    company_keywords = row.get('Extracted_Category_Keywords')
-                    if company_keywords and len(current_templates) > 1:
-                        company_keyword_list = [kw.strip() for kw in str(company_keywords).split(',')]
-                        
-                        template_scores = []
-                        for template in current_templates:
-                            catalog_keywords = extract_category_keywords(template, category)
-                            if catalog_keywords:
-                                catalog_keyword_list = [kw.strip() for kw in catalog_keywords.split(',')]
-                                matches = sum(1 for ck in company_keyword_list if ck in catalog_keyword_list)
-                                template_scores.append((template, matches, len(catalog_keyword_list), catalog_keyword_list))
-                            else:
-                                template_scores.append((template, 0, 0, []))
-                        
-                        max_score = max(score for _, score, _, _ in template_scores)
-                        
-                        if max_score > 0:
-                            best_scored_templates = [(template, score, total_kw, kw_list) for template, score, total_kw, kw_list in template_scores if score == max_score]
-                            
-                            if len(best_scored_templates) == 1:
-                                current_templates = [best_scored_templates[0][0]]
-                                matched_keywords = [ck for ck in company_keyword_list if ck in best_scored_templates[0][3]]
-                                match_steps.append(f"keywords: {', '.join(matched_keywords)} ({max_score} matches)")
-                            else:
-                                min_total_keywords = min(total_kw for _, _, total_kw, _ in best_scored_templates)
-                                final_candidates = [template for template, score, total_kw, kw_list in best_scored_templates if total_kw == min_total_keywords]
-                                
-                                if len(final_candidates) == 1:
-                                    current_templates = final_candidates
-                                    winner_keywords = [kw_list for template, score, total_kw, kw_list in best_scored_templates if template == final_candidates[0]][0]
-                                    matched_keywords = [ck for ck in company_keyword_list if ck in winner_keywords]
-                                    match_steps.append(f"keywords: {', '.join(matched_keywords)} ({max_score} matches, tiebreaker: fewer keywords)")
-                    
-                    elif not company_keywords and len(current_templates) > 1:
-                        no_keyword_templates = []
-                        for template in current_templates:
-                            catalog_keywords = extract_category_keywords(template, category)
-                            if not catalog_keywords:
-                                no_keyword_templates.append(template)
-                        
-                        if len(no_keyword_templates) == 1:
-                            current_templates = no_keyword_templates
-                            match_steps.append("no keywords (fallback)")
-                    
-                    if len(current_templates) == 1:
-                        template = current_templates[0]
-                        matched_df.at[idx, 'Catalog_Match_Found'] = True
-                        matched_df.at[idx, 'Catalog_Template'] = template
-                        matched_df.at[idx, 'Match_Type'] = f'{category.lower()}_weight_keywords'
-                        matched_df.at[idx, 'Match_Strategy'] = f'{category.lower()}_weight_keywords'
-                        matched_df.at[idx, 'Match_Keywords'] = ', '.join(match_steps)
+                    if category == 'Flower':
+                        flower_weight_matches += 1
+                    elif category == 'Preroll':
+                        preroll_matches += 1
+                    else:
                         vape_extract_matches += 1
-                        match_found = True
-                        troubleshooting_data.append({
-                            'Brand': brand,
-                            'Item': item,
-                            'Shop': shop,
-                            'Match_Status': f'{category} weight+keywords match',
-                            'Catalog_Template': template,
-                            'Catalog_Options': f"{len(templates)} total, 1 after filtering",
-                            'Notes': f'Matched by: {", ".join(match_steps)}'
-                        })
+                    
+                    match_found = True
+                    troubleshooting_data.append({
+                        'Brand': brand,
+                        'Item': item,
+                        'Shop': shop,
+                        'Match_Status': f'{category} weight+keywords match',
+                        'Catalog_Template': matched_template,
+                        'Catalog_Options': f"{len(templates)} total, 1 after filtering",
+                        'Notes': f'Matched by: {", ".join(match_steps)}'
+                    })
         
         if not match_found:
             no_matches += 1
     
     progress_bar.progress(1.0)
     
+    # Show results
     total_matches = exact_matches + single_entry_matches + brand_category_matches + flower_weight_matches + preroll_matches + vape_extract_matches
     total_match_rate = (total_matches / len(matched_df)) * 100 if len(matched_df) > 0 else 0
     
-    st.success(f"🎉 Enhanced Matching Results (All Categories):")
+    st.success(f"🎉 Enhanced Matching Results:")
     col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
     with col1:
         st.metric("🎯 Exact", f"{exact_matches:,}")
@@ -950,9 +622,9 @@ def add_smart_brand_matching(company_df, catalog_df):
     with col3:
         st.metric("📂 Brand+Category", f"{brand_category_matches:,}")
     with col4:
-        st.metric("🌸 Flower Weight", f"{flower_weight_matches:,}")
+        st.metric("🌸 Flower", f"{flower_weight_matches:,}")
     with col5:
-        st.metric("🚬 Preroll Multi", f"{preroll_matches:,}")
+        st.metric("🚬 Preroll", f"{preroll_matches:,}")
     with col6:
         st.metric("💨 Vape/Extract", f"{vape_extract_matches:,}")
     with col7:
@@ -960,65 +632,225 @@ def add_smart_brand_matching(company_df, catalog_df):
     with col8:
         st.metric("📈 Rate", f"{total_match_rate:.1f}%")
     
-    unmatched_products = matched_df[matched_df['Catalog_Match_Found'] == False]
-    if len(unmatched_products) > 0:
-        unmatched_brands = unmatched_products['Brand'].value_counts()
-        st.write(f"**🔧 Brands Still Needing Rules ({len(unmatched_brands)} brands, {len(unmatched_products):,} products):**")
-        
-        top_unmatched = unmatched_brands.head(20)
-        brands_list = []
-        for brand, count in top_unmatched.items():
-            brands_list.append(f"{brand} ({count:,})")
-        
-        st.write(f"**Top unmatched brands:** {', '.join(brands_list)}")
-        
-        unique_unmatched_brands = sorted(unmatched_brands.index.tolist())
-        st.write(f"**Complete list of unmatched brands:** {', '.join(unique_unmatched_brands)}")
-        
-        unmatched_brand_categories = unmatched_products.groupby(['Brand', 'Category']).size().reset_index(name='count')
-        if len(unmatched_brand_categories) > 0:
-            st.write(f"**Sample Brand+Category combinations needing rules:**")
-            sample_combinations = unmatched_brand_categories.head(10)
-            for _, row in sample_combinations.iterrows():
-                st.write(f"• {row['Brand']} + {row['Category']}: {row['count']} products")
-    else:
-        st.success("🎉 All products matched successfully!")
-    
+    # Store troubleshooting data
     troubleshooting_df = pd.DataFrame(troubleshooting_data)
     matched_df.troubleshooting_data = troubleshooting_df
     
-    if flower_weight_matches > 0:
-        st.write("**🌸 Sample Flower Weight Matches:**")
-        flower_examples = matched_df[matched_df['Match_Type'] == 'flower_weight_keywords'].head(5)
-        for _, example in flower_examples.iterrows():
-            weight_info = example.get('Match_Keywords', 'N/A')
-            st.write(f"• **{example['Brand']}**: \"{example['Item']}\" → \"{example['Catalog_Template']}\" ({weight_info})")
-    
-    if preroll_matches > 0:
-        st.write("**🚬 Sample Preroll Multi-Step Matches:**")
-        preroll_examples = matched_df[matched_df['Match_Type'] == 'preroll_multi_step'].head(5)
-        for _, example in preroll_examples.iterrows():
-            match_info = example.get('Match_Keywords', 'N/A')
-            st.write(f"• **{example['Brand']}**: \"{example['Item']}\" → \"{example['Catalog_Template']}\" ({match_info})")
-    
-    if vape_extract_matches > 0:
-        st.write("**💨 Sample Vape/Extract Weight+Keywords Matches:**")
-        vape_extract_examples = matched_df[matched_df['Match_Type'].isin(['vape_weight_keywords', 'extract_weight_keywords'])].head(5)
-        for _, example in vape_extract_examples.iterrows():
-            match_info = example.get('Match_Keywords', 'N/A')
-            category = example.get('Category', 'Unknown')
-            st.write(f"• **{example['Brand']}** ({category}): \"{example['Item']}\" → \"{example['Catalog_Template']}\" ({match_info})")
-    
-    if single_entry_matches > 0:
-        st.write("**1️⃣ Sample Auto-Matches:**")
-        auto_examples = matched_df[matched_df['Match_Type'] == 'brand_auto'].head(3)
-        for _, example in auto_examples.iterrows():
-            st.write(f"• **{example['Brand']}**: \"{example['Item']}\" → \"{example['Catalog_Template']}\"")
-    
     return matched_df
 
+def match_flower_products(row, templates):
+    """Advanced matching for flower products using weight and keywords"""
+    current_templates = templates
+    match_steps = []
+    
+    # Filter by weight
+    company_weight = row.get('Extracted_Weight')
+    if company_weight:
+        weight_matched_templates = []
+        for template in current_templates:
+            catalog_weight = extract_weight_from_item(template)
+            if catalog_weight == company_weight:
+                weight_matched_templates.append(template)
+        
+        if weight_matched_templates:
+            current_templates = weight_matched_templates
+            match_steps.append(f"weight: {company_weight}")
+    
+    # Filter by keywords if still multiple options
+    company_keywords = row.get('Extracted_Category_Keywords')
+    if company_keywords and len(current_templates) > 1:
+        company_keyword_list = [kw.strip() for kw in str(company_keywords).split(',')]
+        
+        template_scores = []
+        for template in current_templates:
+            catalog_keywords = extract_category_keywords(template, 'Flower')
+            if catalog_keywords:
+                catalog_keyword_list = [kw.strip() for kw in catalog_keywords.split(',')]
+                matches = sum(1 for ck in company_keyword_list if ck in catalog_keyword_list)
+                template_scores.append((template, matches, len(catalog_keyword_list), catalog_keyword_list))
+            else:
+                template_scores.append((template, 0, 0, []))
+        
+        max_score = max(score for _, score, _, _ in template_scores)
+        if max_score > 0:
+            best_scored_templates = [(template, score, total_kw, kw_list) for template, score, total_kw, kw_list in template_scores if score == max_score]
+            
+            if len(best_scored_templates) == 1:
+                current_templates = [best_scored_templates[0][0]]
+                matched_keywords = [ck for ck in company_keyword_list if ck in best_scored_templates[0][3]]
+                match_steps.append(f"keywords: {', '.join(matched_keywords)}")
+            else:
+                # Tiebreaker: prefer fewer total keywords
+                min_total_keywords = min(total_kw for _, _, total_kw, _ in best_scored_templates)
+                final_candidates = [template for template, score, total_kw, kw_list in best_scored_templates if total_kw == min_total_keywords]
+                
+                if len(final_candidates) == 1:
+                    current_templates = final_candidates
+                    winner_keywords = [kw_list for template, score, total_kw, kw_list in best_scored_templates if template == final_candidates[0]][0]
+                    matched_keywords = [ck for ck in company_keyword_list if ck in winner_keywords]
+                    match_steps.append(f"keywords: {', '.join(matched_keywords)} (tiebreaker)")
+    
+    return (current_templates[0], match_steps) if len(current_templates) == 1 else (None, [])
+
+def match_preroll_products(row, templates):
+    """Advanced matching for preroll products using infused status, weight, pack size, and keywords"""
+    # Filter by infused status first
+    company_has_infused = 'infused' in str(row['Item']).lower()
+    
+    infused_filtered_templates = []
+    for template in templates:
+        template_has_infused = 'infused' in str(template).lower()
+        if company_has_infused == template_has_infused:
+            infused_filtered_templates.append(template)
+    
+    current_templates = infused_filtered_templates if infused_filtered_templates else templates
+    match_steps = []
+    if infused_filtered_templates:
+        match_steps.append(f"infused: {'yes' if company_has_infused else 'no'}")
+    
+    # Filter by weight
+    company_weight = row.get('Extracted_Weight')
+    if company_weight and len(current_templates) > 1:
+        weight_matched_templates = []
+        for template in current_templates:
+            catalog_weight = extract_weight_from_item(template)
+            if catalog_weight == company_weight:
+                weight_matched_templates.append(template)
+        
+        if weight_matched_templates:
+            current_templates = weight_matched_templates
+            match_steps.append(f"weight: {company_weight}")
+    
+    # Filter by pack size
+    company_pack = row.get('Extracted_Pack_Size')
+    if company_pack and len(current_templates) > 1:
+        pack_matched_templates = []
+        for template in current_templates:
+            catalog_pack = extract_pack_size_from_item(template)
+            if catalog_pack == company_pack:
+                pack_matched_templates.append(template)
+        
+        if pack_matched_templates:
+            current_templates = pack_matched_templates
+            match_steps.append(f"pack: {company_pack}")
+    elif not company_pack and len(current_templates) > 1:
+        # Fallback: prefer templates without pack sizes
+        no_pack_templates = []
+        for template in current_templates:
+            catalog_pack = extract_pack_size_from_item(template)
+            if not catalog_pack:
+                no_pack_templates.append(template)
+        
+        if len(no_pack_templates) == 1:
+            current_templates = no_pack_templates
+            match_steps.append("no pack (fallback)")
+    
+    # Filter by type keywords (excluding 'infused')
+    company_keywords = row.get('Extracted_Category_Keywords')
+    if company_keywords and len(current_templates) > 1:
+        company_keyword_list = [kw.strip() for kw in str(company_keywords).split(',')]
+        company_type_keywords = [kw for kw in company_keyword_list if kw != 'infused']
+        
+        if company_type_keywords:
+            template_scores = []
+            for template in current_templates:
+                catalog_keywords = extract_category_keywords(template, 'Preroll')
+                if catalog_keywords:
+                    catalog_keyword_list = [kw.strip() for kw in catalog_keywords.split(',')]
+                    catalog_type_keywords = [kw for kw in catalog_keyword_list if kw != 'infused']
+                    matches = sum(1 for ck in company_type_keywords if ck in catalog_type_keywords)
+                    template_scores.append((template, matches, len(catalog_type_keywords), catalog_type_keywords))
+                else:
+                    template_scores.append((template, 0, 0, []))
+            
+            max_score = max(score for _, score, _, _ in template_scores)
+            if max_score > 0:
+                best_scored_templates = [(template, score, total_kw, kw_list) for template, score, total_kw, kw_list in template_scores if score == max_score]
+                
+                if len(best_scored_templates) == 1:
+                    current_templates = [best_scored_templates[0][0]]
+                    matched_keywords = [ck for ck in company_type_keywords if ck in best_scored_templates[0][3]]
+                    match_steps.append(f"type: {', '.join(matched_keywords)}")
+                else:
+                    # Tiebreaker: prefer fewer total keywords
+                    min_total_keywords = min(total_kw for _, _, total_kw, _ in best_scored_templates)
+                    final_candidates = [template for template, score, total_kw, kw_list in best_scored_templates if total_kw == min_total_keywords]
+                    
+                    if len(final_candidates) == 1:
+                        current_templates = final_candidates
+                        winner_keywords = [kw_list for template, score, total_kw, kw_list in best_scored_templates if template == final_candidates[0]][0]
+                        matched_keywords = [ck for ck in company_type_keywords if ck in winner_keywords]
+                        match_steps.append(f"type: {', '.join(matched_keywords)} (tiebreaker)")
+    
+    return (current_templates[0], match_steps) if len(current_templates) == 1 else (None, [])
+
+def match_vape_extract_products(row, templates, category):
+    """Advanced matching for vape and extract products using weight and keywords"""
+    current_templates = templates
+    match_steps = []
+    
+    # Filter by weight
+    company_weight = row.get('Extracted_Weight')
+    if company_weight and len(current_templates) > 1:
+        weight_matched_templates = []
+        for template in current_templates:
+            catalog_weight = extract_weight_from_item(template)
+            if catalog_weight == company_weight:
+                weight_matched_templates.append(template)
+        
+        if weight_matched_templates:
+            current_templates = weight_matched_templates
+            match_steps.append(f"weight: {company_weight}")
+    
+    # Filter by keywords
+    company_keywords = row.get('Extracted_Category_Keywords')
+    if company_keywords and len(current_templates) > 1:
+        company_keyword_list = [kw.strip() for kw in str(company_keywords).split(',')]
+        
+        template_scores = []
+        for template in current_templates:
+            catalog_keywords = extract_category_keywords(template, category)
+            if catalog_keywords:
+                catalog_keyword_list = [kw.strip() for kw in catalog_keywords.split(',')]
+                matches = sum(1 for ck in company_keyword_list if ck in catalog_keyword_list)
+                template_scores.append((template, matches, len(catalog_keyword_list), catalog_keyword_list))
+            else:
+                template_scores.append((template, 0, 0, []))
+        
+        max_score = max(score for _, score, _, _ in template_scores)
+        if max_score > 0:
+            best_scored_templates = [(template, score, total_kw, kw_list) for template, score, total_kw, kw_list in template_scores if score == max_score]
+            
+            if len(best_scored_templates) == 1:
+                current_templates = [best_scored_templates[0][0]]
+                matched_keywords = [ck for ck in company_keyword_list if ck in best_scored_templates[0][3]]
+                match_steps.append(f"keywords: {', '.join(matched_keywords)}")
+            else:
+                # Tiebreaker: prefer fewer total keywords
+                min_total_keywords = min(total_kw for _, _, total_kw, _ in best_scored_templates)
+                final_candidates = [template for template, score, total_kw, kw_list in best_scored_templates if total_kw == min_total_keywords]
+                
+                if len(final_candidates) == 1:
+                    current_templates = final_candidates
+                    winner_keywords = [kw_list for template, score, total_kw, kw_list in best_scored_templates if template == final_candidates[0]][0]
+                    matched_keywords = [ck for ck in company_keyword_list if ck in winner_keywords]
+                    match_steps.append(f"keywords: {', '.join(matched_keywords)} (tiebreaker)")
+    elif not company_keywords and len(current_templates) > 1:
+        # Fallback: prefer templates without keywords
+        no_keyword_templates = []
+        for template in current_templates:
+            catalog_keywords = extract_category_keywords(template, category)
+            if not catalog_keywords:
+                no_keyword_templates.append(template)
+        
+        if len(no_keyword_templates) == 1:
+            current_templates = no_keyword_templates
+            match_steps.append("no keywords (fallback)")
+    
+    return (current_templates[0], match_steps) if len(current_templates) == 1 else (None, [])
+
 def add_simple_price_comparison(company_df, catalog_df):
-    """Simple price comparison - just add basic price difference columns"""
+    """Simple price comparison - add basic price difference columns"""
     if company_df is None or catalog_df is None:
         return company_df
     
@@ -1031,6 +863,7 @@ def add_simple_price_comparison(company_df, catalog_df):
     st.info(f"💰 Adding price comparison for {len(matched_products):,} matched products...")
     
     def clean_price(price_str):
+        """Clean and convert price string to float"""
         if pd.isna(price_str) or price_str == '':
             return None
         try:
@@ -1039,11 +872,13 @@ def add_simple_price_comparison(company_df, catalog_df):
         except:
             return None
     
+    # Initialize price comparison columns
     company_df['Catalog_Retail_Price'] = None
     company_df['Catalog_Sale_Price'] = None
     company_df['Retail_Price_Diff'] = None
     company_df['Sale_Price_Diff'] = None
     
+    # Build catalog lookup
     catalog_lookup = {}
     for _, cat_row in catalog_df.iterrows():
         template = cat_row['Profile Template']
@@ -1052,6 +887,7 @@ def add_simple_price_comparison(company_df, catalog_df):
     
     pricing_issues = 0
     
+    # Compare prices for each matched product
     for idx, row in matched_products.iterrows():
         catalog_template = row['Catalog_Template']
         catalog_location = row['Catalog_Location']
@@ -1063,6 +899,7 @@ def add_simple_price_comparison(company_df, catalog_df):
         if catalog_data is None:
             continue
         
+        # Get catalog prices for this location
         retail_price_col = f"{catalog_location} Retail Price"
         sale_price_col = f"{catalog_location} Sale Price"
         
@@ -1071,15 +908,18 @@ def add_simple_price_comparison(company_df, catalog_df):
         company_retail = clean_price(row.get('Unit Price'))
         company_sale = clean_price(row.get('Unit Sale Price'))
         
+        # Store catalog prices
         company_df.at[idx, 'Catalog_Retail_Price'] = catalog_retail
         company_df.at[idx, 'Catalog_Sale_Price'] = catalog_sale
         
+        # Calculate differences
         if catalog_retail is not None and company_retail is not None:
             company_df.at[idx, 'Retail_Price_Diff'] = company_retail - catalog_retail
         
         if catalog_sale is not None and company_sale is not None:
             company_df.at[idx, 'Sale_Price_Diff'] = company_sale - catalog_sale
         
+        # Count pricing issues (differences > $0.01)
         retail_diff = company_df.at[idx, 'Retail_Price_Diff']
         sale_diff = company_df.at[idx, 'Sale_Price_Diff']
         
@@ -1094,7 +934,7 @@ def add_simple_price_comparison(company_df, catalog_df):
     return company_df
 
 def main():
-    st.title("🛒 Product Price Checker")
+    st.title(f"🛒 Product Price Checker v{VERSION}")
     st.markdown("Filter your Company Products CSV and connect to Product Catalog data")
     
     st.sidebar.header("📊 Data Sources")
@@ -1119,6 +959,7 @@ def main():
     if st.sidebar.button("🚀 Load Data", type="primary"):
         with st.spinner("Loading data from all sources..."):
             
+            # Load Product Catalog
             connect_catalog_df = None
             if google_sheets_available:
                 st.info("📊 Loading Connect Product Catalog reference data...")
@@ -1131,6 +972,7 @@ def main():
                 else:
                     st.error("❌ Failed to load Connect Product Catalog")
             
+            # Load and process Company Products
             filtered_csv = None
             if uploaded_file is not None:
                 st.info("📄 Processing Company Products CSV...")
@@ -1153,6 +995,7 @@ def main():
                 else:
                     st.error("❌ Failed to load Company Products CSV")
             
+            # Summary
             loaded_sources = 0
             if connect_catalog_df is not None:
                 loaded_sources += 1
@@ -1164,8 +1007,10 @@ def main():
             else:
                 st.error("❌ No data could be loaded. Check your files/URLs and permissions.")
     
+    # Display data tabs if any data is loaded
     if any(key in st.session_state for key in ['df_csv', 'df_catalog']):
         
+        # Build tab list dynamically
         tab_names = ["📊 Overview"]
         if 'df_csv' in st.session_state:
             tab_names.append("📄 Company Products")
@@ -1179,12 +1024,14 @@ def main():
         tabs = st.tabs(tab_names)
         tab_index = 0
         
+        # Overview Tab
         with tabs[tab_index]:
             st.subheader("📊 Data Overview")
             
             if 'df_csv' in st.session_state:
                 df_csv = st.session_state['df_csv']
                 
+                # Main metrics
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric("Total Products", f"{len(df_csv):,}")
@@ -1203,10 +1050,11 @@ def main():
                         price_issues = (retail_issues | sale_issues).sum()
                         st.metric("Price Issues", f"{price_issues:,}")
                 with col4:
-                    if 'Retail_Price_Diff' in df_csv.columns and matched_count > 0:
+                    if 'Retail_Price_Diff' in df_csv.columns and 'matched_count' in locals():
                         consistency_rate = ((matched_count - price_issues) / matched_count * 100) if matched_count > 0 else 0
                         st.metric("Price Consistency", f"{consistency_rate:.1f}%")
                 
+                # Matching breakdown
                 if 'Match_Type' in df_csv.columns:
                     st.write("**🎯 Enhanced Matching Breakdown:**")
                     match_type_counts = df_csv[df_csv['Catalog_Match_Found'] == True]['Match_Type'].value_counts()
@@ -1220,7 +1068,7 @@ def main():
                         st.metric("⚡ Auto", f"{auto_count:,}")
                     with col3:
                         flower_count = match_type_counts.get('flower_weight_keywords', 0)
-                        preroll_count = match_type_counts.get('preroll_multi_step', 0)
+                        preroll_count = match_type_counts.get('preroll_weight_keywords', 0)
                         st.metric("🌸 Weight+Multi", f"{flower_count + preroll_count:,}")
                     with col4:
                         vape_extract_count = match_type_counts.get('vape_weight_keywords', 0) + match_type_counts.get('extract_weight_keywords', 0)
@@ -1229,6 +1077,7 @@ def main():
                         total_matched = match_type_counts.sum()
                         st.metric("📊 Total Matched", f"{total_matched:,}")
                 
+                # Pricing summary
                 if 'Retail_Price_Diff' in df_csv.columns:
                     st.write("**🎯 Pricing Analysis Summary:**")
                     matched_with_prices = df_csv[(df_csv['Catalog_Match_Found'] == True) & 
@@ -1244,6 +1093,7 @@ def main():
         
         tab_index += 1
         
+        # Company Products Tab
         if 'df_csv' in st.session_state:
             with tabs[tab_index]:
                 st.subheader(f"📄 {st.session_state['df_csv_name']}")
@@ -1251,19 +1101,18 @@ def main():
                 
                 df_csv = st.session_state['df_csv']
                 
+                # Summary metrics
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric("📦 Total Products", f"{len(df_csv):,}")
                 with col2:
                     if 'Catalog_Location' in df_csv.columns:
                         mapped_count = df_csv['Catalog_Location'].notna().sum()
-                        total_count = len(df_csv)
                         st.metric("🔗 Location Mapped", f"{mapped_count:,}")
                 with col3:
                     if 'Catalog_Match_Found' in df_csv.columns:
                         matched_count = df_csv['Catalog_Match_Found'].sum()
-                        total_count = len(df_csv)
-                        match_rate = (matched_count / total_count * 100) if total_count > 0 else 0
+                        match_rate = (matched_count / len(df_csv) * 100) if len(df_csv) > 0 else 0
                         st.metric("🎯 Catalog Matched", f"{matched_count:,} ({match_rate:.1f}%)")
                 with col4:
                     if 'Retail_Price_Diff' in df_csv.columns:
@@ -1272,8 +1121,10 @@ def main():
                         price_issues = (retail_issues | sale_issues).sum()
                         st.metric("💰 Price Issues", f"{price_issues:,}")
                 
+                # Data table
                 st.dataframe(df_csv, use_container_width=True)
                 
+                # Download button
                 csv_buffer = io.StringIO()
                 df_csv.to_csv(csv_buffer, index=False)
                 st.download_button(
@@ -1284,6 +1135,7 @@ def main():
                 )
             tab_index += 1
         
+        # Price Inspector Tab
         if 'df_csv' in st.session_state and 'Catalog_Match_Found' in st.session_state['df_csv'].columns:
             matched_data = st.session_state['df_csv'][st.session_state['df_csv']['Catalog_Match_Found'] == True]
             if len(matched_data) > 0:
@@ -1291,6 +1143,7 @@ def main():
                     st.subheader("💰 Price Inspector")
                     st.info("Review matched products and identify pricing discrepancies")
                     
+                    # Filters
                     col1, col2, col3 = st.columns(3)
                     with col1:
                         show_price_issues_only = st.checkbox(
@@ -1319,6 +1172,7 @@ def main():
                         else:
                             selected_locations = None
                     
+                    # Apply filters
                     filtered_matches = matched_data.copy()
                     
                     if show_price_issues_only:
@@ -1344,6 +1198,7 @@ def main():
                     
                     st.write(f"Showing {len(filtered_matches)} of {len(matched_data)} matched products")
                     
+                    # Display filtered data
                     if len(filtered_matches) > 0:
                         display_columns = [
                             'Brand', 'Item', 'Catalog_Template', 'Catalog_Location', 'Inventory Available',
@@ -1354,6 +1209,7 @@ def main():
                         available_columns = [col for col in display_columns if col in filtered_matches.columns]
                         display_df = filtered_matches[available_columns].copy()
                         
+                        # Format numeric columns
                         numeric_price_columns = ['Catalog_Retail_Price', 'Retail_Price_Diff', 'Catalog_Sale_Price', 'Sale_Price_Diff']
                         for col in numeric_price_columns:
                             if col in display_df.columns:
@@ -1361,6 +1217,7 @@ def main():
                         
                         st.dataframe(display_df, use_container_width=True)
                         
+                        # Download button
                         csv_buffer = io.StringIO()
                         display_df.to_csv(csv_buffer, index=False)
                         
@@ -1392,6 +1249,7 @@ def main():
                 
                 tab_index += 1
         
+        # Troubleshooting Tab
         if 'df_csv' in st.session_state and hasattr(st.session_state['df_csv'], 'troubleshooting_data'):
             with tabs[tab_index]:
                 st.subheader("🔧 Matching Troubleshooting")
@@ -1404,7 +1262,7 @@ def main():
                 
                 status_counts = unsuccessful_matches['Match_Status'].value_counts()
                 
-                st.write("**🔍 Unsuccessful Match Breakdown:**")
+                # Summary metrics
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     missing_data_count = status_counts.get('Missing brand or item', 0)
@@ -1417,6 +1275,7 @@ def main():
                     success_rate = ((total_records - total_unsuccessful) / total_records * 100) if total_records > 0 else 0
                     st.metric("✅ Success Rate", f"{success_rate:.1f}%")
                 
+                # Filter options
                 status_filter = st.selectbox(
                     "Filter by Issue Type:",
                     options=['All Issues'] + list(status_counts.index),
@@ -1427,8 +1286,9 @@ def main():
                 if status_filter != 'All Issues':
                     filtered_troubleshooting = filtered_troubleshooting[filtered_troubleshooting['Match_Status'] == status_filter]
                 
-                st.write("**🔍 Brands with Most Unmatched Products:**")
+                # Show problematic brands
                 if len(filtered_troubleshooting) > 0:
+                    st.write("**🔍 Brands with Most Unmatched Products:**")
                     brand_unmatched = filtered_troubleshooting['Brand'].value_counts().head(10)
                     st.bar_chart(brand_unmatched)
                     
@@ -1441,6 +1301,7 @@ def main():
                 else:
                     st.success("🎉 No unsuccessful matches found!")
                 
+                # Detailed troubleshooting data
                 st.write(f"**📋 Unsuccessful Match Details ({len(filtered_troubleshooting)} records):**")
                 if len(filtered_troubleshooting) > 0:
                     st.dataframe(filtered_troubleshooting, use_container_width=True)
@@ -1457,6 +1318,7 @@ def main():
                     st.info("No unsuccessful matches to display!")
             tab_index += 1
         
+        # Product Catalog Tab
         if 'df_catalog' in st.session_state:
             with tabs[tab_index]:
                 st.subheader(f"📋 {st.session_state['df_catalog_name']}")
@@ -1473,28 +1335,28 @@ def main():
                 )
     
     else:
+        # Welcome screen
         st.info("👆 Upload your Company Products CSV in the sidebar and click 'Load Data' to get started")
         
         st.subheader("📄 Data Processing Workflow")
         
-        st.markdown("""
-        **🎯 Current Processing (Smart Matching + Simple Price Comparison):**
+        st.markdown(f"""
+        **🎯 Product Price Checker v{VERSION} Features:**
         
         1. **📄 Company Products (CSV Upload)**
            - ✅ Filters out inactive products (Active ≠ "No"/"False")
            - ✅ Excludes unwanted categories (Display, Clones, Apparel, etc.)
-           - ✅ Keeps only essential columns for price checking
            - ✅ Cross-references with brands from Product Catalog
            - ✅ Maps shop names to catalog locations
-           - ✅ Smart brand structure matching (93.4% success rate)
-           - ✅ **NEW: Simple price comparison for matched products**
-           - ✅ **NEW: Weight and pack size extraction for enhanced matching**
+           - ✅ Smart brand structure matching with advanced algorithms
+           - ✅ Weight and pack size extraction for enhanced matching
+           - ✅ Price comparison for matched products
         
         2. **📋 Connect Product Catalog (Auto-loaded)**
            - ✅ Reference data for lookups and brand extraction
            - ✅ Brand column contains the master brand list
            - ✅ Profile Template column used for smart matching
-           - ✅ **Price columns used for comparison (Retail Price, Sale Price by location)**
+           - ✅ Price columns used for comparison (Retail Price, Sale Price by location)
         """)
         
         col1, col2 = st.columns(2)
@@ -1502,10 +1364,10 @@ def main():
         with col1:
             st.markdown("""
             **🧠 Smart Matching Logic**
-            - **Single Entry Brands**: Auto-match (e.g., Almora, Astronauts)
-            - **Multiple Entry Brands**: Keyword matching (e.g., Kurvana "Originals" vs "ASCND")
-            - **Special Cases**: Block Party (weight-based), Turn ("Live Resin")
-            - **Enhanced with Weight/Pack extraction** for future flower/preroll matching
+            - **Exact Match**: Perfect product name matches
+            - **Single Entry Brands**: Auto-match when only one catalog option
+            - **Multi-Entry Brands**: Advanced keyword and weight matching
+            - **Category-Specific Rules**: Flower, Preroll, Vape, Extract matching
             """)
         
         with col2:
