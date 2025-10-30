@@ -1,6 +1,29 @@
 """
-Product Price Checker v4.0
+Product Price Checker v4.1.1
 Smart brand matching and price comparison tool for cannabis retail products
+Now with automatic CSV type detection and shop filtering
+
+CHANGELOG:
+v4.1.1 (2025-01-XX)
+- Fixed CSV type detection display issues
+- Added version number display in sidebar
+- Added changelog documentation
+- Improved shop selector visibility for single shop exports
+- Enhanced detection messaging
+
+v4.1.0 (2025-01-XX)
+- Added automatic CSV type detection (Company vs Shop)
+- Added shop filtering for company exports
+- Added shop identification for single shop exports
+- Updated catalog location mapping for both CSV types
+
+v4.0.0 (2025-01-XX)
+- Smart brand structure matching
+- Enhanced matching for Flower, Preroll, Vape, Extract categories
+- Weight and pack size extraction
+- Category keyword extraction
+- Price comparison functionality
+- Troubleshooting tab
 """
 
 import streamlit as st
@@ -13,13 +36,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Configure page
 st.set_page_config(
-    page_title="Product Price Checker v4.0",
+    page_title="Product Price Checker v4.1.1",
     page_icon="🛒",
     layout="wide"
 )
 
 # Configuration
-VERSION = "4.0"
+VERSION = "4.1.1"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -44,6 +67,32 @@ EXACT_PRODUCT_MATCH_BRANDS = {
     'Papa & Barkley', 'Sip Elixirs', 'St. Ides', "Uncle Arnie's", 'Vet CBD', 
     'Wyld', 'Yummi Karma', "Not Your Father's"
 }
+
+def detect_csv_type(df):
+    """
+    Detect if CSV is a Company export (multi-shop) or Shop export (single shop)
+    Returns: 'company' if Shop column exists, 'shop' if not, None if invalid
+    """
+    if df is None or df.empty:
+        return None
+    
+    # Check if first column is 'Shop'
+    first_col = str(df.columns[0]).strip()
+    
+    if first_col == 'Shop':
+        return 'company'
+    elif first_col == 'SKU':
+        return 'shop'
+    else:
+        return None
+
+def get_unique_shops(df):
+    """Extract unique shop names from company export"""
+    if df is None or 'Shop' not in df.columns:
+        return []
+    
+    shops = df['Shop'].dropna().unique()
+    return sorted([str(shop).strip() for shop in shops if str(shop).strip() and str(shop) != 'nan'])
 
 def extract_weight_from_item(item_text):
     """Extract weight from item text (e.g., "Blue Dream 3.5g" → "3.5g")"""
@@ -249,18 +298,28 @@ def load_csv_data(uploaded_file):
         st.error(f"Error loading CSV file: {str(e)}")
         return None, None
 
-def filter_company_products(df, connect_catalog_df=None):
-    """Filter company products data by Active field, keep only specified columns, and filter by brands"""
+def filter_company_products(df, connect_catalog_df=None, selected_shop=None, csv_type='company'):
+    """Filter company products data by Active field, shop (if company export), keep only specified columns, and filter by brands"""
     if df is None or df.empty:
         return None
     
-    st.write(f"**Company Products** - Original data shape: {df.shape}")
+    st.write(f"**CSV Type Detected**: {csv_type.upper()}")
+    st.write(f"**Original data shape**: {df.shape}")
+    
+    # Filter by selected shop if company export
+    if csv_type == 'company' and selected_shop and selected_shop != 'All Shops':
+        if 'Shop' in df.columns:
+            before_shop_filter = len(df)
+            df = df[df['Shop'] == selected_shop].copy()
+            after_shop_filter = len(df)
+            st.write(f"**After filtering to '{selected_shop}'**: {df.shape}")
+            st.info(f"🏪 Filtered to {selected_shop}: {after_shop_filter:,} products (removed {before_shop_filter - after_shop_filter:,})")
     
     # Filter by Active status
     if 'Active' in df.columns:
         df['Active'] = df['Active'].astype(str).str.strip()
         active_df = df[~df['Active'].isin(['No', 'False', 'no', 'false', 'NO', 'FALSE', 'N', 'n'])]
-        st.write(f"**Company Products** - After filtering by Active field: {active_df.shape}")
+        st.write(f"**After filtering by Active field**: {active_df.shape}")
     else:
         st.warning("No 'Active' column found. Using all data.")
         active_df = df.copy()
@@ -276,7 +335,7 @@ def filter_company_products(df, connect_catalog_df=None):
         active_df = active_df[~active_df['Category'].isin(categories_to_exclude)]
         after_category_filter = len(active_df)
         removed_count = before_category_filter - after_category_filter
-        st.write(f"**Company Products** - After excluding unwanted categories: {active_df.shape}")
+        st.write(f"**After excluding unwanted categories**: {active_df.shape}")
         if removed_count > 0:
             st.info(f"🚫 Excluded {removed_count} products from categories: {', '.join(categories_to_exclude)}")
     
@@ -296,7 +355,7 @@ def filter_company_products(df, connect_catalog_df=None):
         st.warning(f"Missing columns: {missing_columns}")
     
     filtered_df = active_df[existing_columns].copy()
-    st.write(f"**Company Products** - After column filtering: {filtered_df.shape}")
+    st.write(f"**After column filtering**: {filtered_df.shape}")
     
     # Filter by valid brands from catalog
     if connect_catalog_df is not None and not connect_catalog_df.empty and 'Brand' in filtered_df.columns:
@@ -308,11 +367,11 @@ def filter_company_products(df, connect_catalog_df=None):
             filtered_df = filtered_df[filtered_df['Brand'].isin(valid_brands)]
             after_brand_filter = len(filtered_df)
             
-            st.write(f"**Company Products** - After brand filtering: {filtered_df.shape}")
+            st.write(f"**After brand filtering**: {filtered_df.shape}")
             st.info(f"🎯 Filtered to only include {len(valid_brands)} brands from Product Catalog. Removed {before_brand_filter - after_brand_filter} products.")
     
     # Add data source identifier
-    filtered_df['Data_Source'] = "Company Products"
+    filtered_df['Data_Source'] = csv_type.title()
     
     # Extract enhanced matching data
     st.info("🔍 Extracting Weight, Pack Size, and Category Keywords for enhanced matching...")
@@ -343,24 +402,39 @@ def filter_company_products(df, connect_catalog_df=None):
                     percentage = (category_keywords / category_total * 100)
                     st.write(f"• **{category}**: {category_keywords:,} / {category_total:,} products ({percentage:.1f}%)")
     
-    st.write(f"**Company Products** - Final filtered data shape: {filtered_df.shape}")
+    st.write(f"**Final filtered data shape**: {filtered_df.shape}")
     return filtered_df
 
-def add_catalog_location_mapping(df):
-    """Add a 'Catalog_Location' column to Company Products"""
-    if df is None or df.empty or 'Shop' not in df.columns:
+def add_catalog_location_mapping(df, csv_type='company', selected_shop=None):
+    """Add a 'Catalog_Location' column to products"""
+    if df is None or df.empty:
         return df
     
     df_copy = df.copy()
-    df_copy['Catalog_Location'] = df_copy['Shop'].map(SHOP_NAME_MAPPING)
     
-    unmapped_shops = df_copy[df_copy['Catalog_Location'].isna()]['Shop'].unique()
-    if len(unmapped_shops) > 0:
-        st.warning(f"⚠️ Unmapped shops found: {list(unmapped_shops)}")
+    if csv_type == 'company':
+        if 'Shop' not in df_copy.columns:
+            st.warning("⚠️ Company export missing 'Shop' column")
+            return df_copy
+        
+        df_copy['Catalog_Location'] = df_copy['Shop'].map(SHOP_NAME_MAPPING)
+        
+        unmapped_shops = df_copy[df_copy['Catalog_Location'].isna()]['Shop'].unique()
+        if len(unmapped_shops) > 0:
+            st.warning(f"⚠️ Unmapped shops found: {list(unmapped_shops)}")
+        
+        mapped_count = df_copy['Catalog_Location'].notna().sum()
+        total_count = len(df_copy)
+        st.info(f"✅ Shop mapping: {mapped_count}/{total_count} products mapped to catalog locations")
     
-    mapped_count = df_copy['Catalog_Location'].notna().sum()
-    total_count = len(df_copy)
-    st.info(f"✅ Shop mapping: {mapped_count}/{total_count} products mapped to catalog locations")
+    elif csv_type == 'shop':
+        # For shop exports, we need to use the selected shop name for mapping
+        if selected_shop and selected_shop in SHOP_NAME_MAPPING:
+            catalog_location = SHOP_NAME_MAPPING[selected_shop]
+            df_copy['Catalog_Location'] = catalog_location
+            st.info(f"✅ Mapped all {len(df_copy):,} products to catalog location: {catalog_location}")
+        else:
+            st.warning(f"⚠️ Cannot map shop '{selected_shop}' to catalog location")
     
     return df_copy
 
@@ -935,16 +1009,110 @@ def add_simple_price_comparison(company_df, catalog_df):
 
 def main():
     st.title(f"🛒 Product Price Checker v{VERSION}")
-    st.markdown("Filter your Company Products CSV and connect to Product Catalog data")
+    st.markdown("Filter your products and connect to Product Catalog data with automatic CSV type detection")
     
     st.sidebar.header("📊 Data Sources")
     
-    st.sidebar.subheader("📄 Upload Company Products")
+    st.sidebar.subheader("📄 Upload Products CSV")
     uploaded_file = st.sidebar.file_uploader(
-        "Upload Company Products CSV:",
+        "Upload CSV (Company or Single Shop):",
         type=['csv'],
-        help="Upload your company's product CSV file. Will be filtered by Active status and matched against Product Catalog brands."
+        help="Upload either a Company Products CSV (multi-shop) or a Single Shop CSV. Will be automatically detected."
     )
+    
+    # Initialize session state for CSV type and shops
+    if 'csv_type' not in st.session_state:
+        st.session_state['csv_type'] = None
+    if 'available_shops' not in st.session_state:
+        st.session_state['available_shops'] = []
+    if 'selected_shop' not in st.session_state:
+        st.session_state['selected_shop'] = None
+    if 'detection_complete' not in st.session_state:
+        st.session_state['detection_complete'] = False
+    
+    # Auto-detect CSV type when file is uploaded
+    if uploaded_file is not None:
+        # Only detect once per file upload
+        file_name = uploaded_file.name
+        if st.session_state.get('last_uploaded_file') != file_name:
+            st.session_state['last_uploaded_file'] = file_name
+            st.session_state['detection_complete'] = False
+            
+            try:
+                # Read CSV to detect type
+                temp_df = pd.read_csv(uploaded_file, skiprows=1, nrows=5)
+                detected_type = detect_csv_type(temp_df)
+                
+                st.session_state['csv_type'] = detected_type
+                
+                # If company export, get available shops
+                if detected_type == 'company':
+                    uploaded_file.seek(0)
+                    full_df = pd.read_csv(uploaded_file, skiprows=1)
+                    shops = get_unique_shops(full_df)
+                    st.session_state['available_shops'] = shops
+                    if not st.session_state.get('selected_shop'):
+                        st.session_state['selected_shop'] = 'All Shops'
+                elif detected_type == 'shop':
+                    # For shop exports, set default to first option
+                    st.session_state['available_shops'] = []
+                    shop_options = list(SHOP_NAME_MAPPING.keys())
+                    if not st.session_state.get('selected_shop') or st.session_state['selected_shop'] not in shop_options:
+                        st.session_state['selected_shop'] = shop_options[0]
+                else:
+                    st.session_state['available_shops'] = []
+                    st.session_state['selected_shop'] = None
+                
+                st.session_state['detection_complete'] = True
+                
+                # Reset file pointer
+                uploaded_file.seek(0)
+            except Exception as e:
+                st.sidebar.error(f"Error detecting CSV type: {str(e)}")
+                st.sidebar.error(f"Debug info: First column = {temp_df.columns[0] if 'temp_df' in locals() else 'Could not read'}")
+    
+    # Show CSV type indicator
+    if uploaded_file is not None and st.session_state['csv_type']:
+        csv_type_display = st.session_state['csv_type'].upper()
+        if st.session_state['csv_type'] == 'company':
+            st.sidebar.success(f"✅ Detected: {csv_type_display} Export (Multi-Shop)")
+        elif st.session_state['csv_type'] == 'shop':
+            st.sidebar.success(f"✅ Detected: {csv_type_display} Export (Single Shop)")
+    
+    # Show shop selector for company exports
+    if st.session_state['csv_type'] == 'company' and st.session_state['available_shops']:
+        st.sidebar.subheader("🏪 Shop Selection")
+        shop_options = ['All Shops'] + st.session_state['available_shops']
+        selected_shop = st.sidebar.selectbox(
+            "Select Shop to Process:",
+            options=shop_options,
+            index=shop_options.index(st.session_state['selected_shop']) if st.session_state['selected_shop'] in shop_options else 0,
+            help="Choose a specific shop or 'All Shops' to process all shops together"
+        )
+        st.session_state['selected_shop'] = selected_shop
+        
+        if selected_shop != 'All Shops':
+            st.sidebar.info(f"📍 Will process only: {selected_shop}")
+    
+    # For shop exports, ask which shop this data is from
+    elif st.session_state['csv_type'] == 'shop':
+        st.sidebar.subheader("🏪 Shop Identification")
+        st.sidebar.info("Please identify which shop this single-shop export is from:")
+        shop_options = list(SHOP_NAME_MAPPING.keys())
+        
+        # Get the current index
+        current_index = 0
+        if st.session_state['selected_shop'] and st.session_state['selected_shop'] in shop_options:
+            current_index = shop_options.index(st.session_state['selected_shop'])
+        
+        selected_shop = st.sidebar.selectbox(
+            "Which shop is this data from?",
+            options=shop_options,
+            index=current_index,
+            help="Select the shop this single-shop CSV export is from for proper catalog mapping"
+        )
+        st.session_state['selected_shop'] = selected_shop
+        st.sidebar.success(f"📍 Data source: {selected_shop}")
     
     google_sheets_available = "google_sheets" in st.secrets
     
@@ -954,9 +1122,34 @@ def main():
         st.sidebar.info("Product catalog will be automatically loaded from configured Google Sheet")
     else:
         st.sidebar.warning("⚠️ Google Sheets API not configured")
-        st.sidebar.info("Company Products filtering will work, but brand cross-referencing will be skipped")
+        st.sidebar.info("Product filtering will work, but brand cross-referencing will be skipped")
     
-    if st.sidebar.button("🚀 Load Data", type="primary"):
+    # Add changelog expander
+    with st.sidebar.expander("📋 Version History & Changelog"):
+        st.markdown("""
+        **v4.1.1** (Current)
+        - Fixed CSV type detection display
+        - Added version number in sidebar
+        - Enhanced shop selector visibility
+        - Improved detection messaging
+        
+        **v4.1.0**
+        - Auto CSV type detection
+        - Shop filtering for company exports
+        - Shop identification for single exports
+        
+        **v4.0.0**
+        - Smart brand matching
+        - Enhanced category matching
+        - Price comparison
+        - Troubleshooting tools
+        """)
+    
+    # Add version at bottom of sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(f"**Version {VERSION}**")
+    
+    if st.sidebar.button("🚀 Load Data", type="primary", disabled=(uploaded_file is None or st.session_state['selected_shop'] is None)):
         with st.spinner("Loading data from all sources..."):
             
             # Load Product Catalog
@@ -972,15 +1165,27 @@ def main():
                 else:
                     st.error("❌ Failed to load Connect Product Catalog")
             
-            # Load and process Company Products
+            # Load and process Products CSV
             filtered_csv = None
-            if uploaded_file is not None:
-                st.info("📄 Processing Company Products CSV...")
+            if uploaded_file is not None and st.session_state['csv_type']:
+                csv_type = st.session_state['csv_type']
+                selected_shop = st.session_state.get('selected_shop')
+                
+                st.info(f"📄 Processing {csv_type.upper()} CSV...")
                 df_csv, csv_name = load_csv_data(uploaded_file)
                 if df_csv is not None:
-                    filtered_csv = filter_company_products(df_csv, connect_catalog_df)
+                    filtered_csv = filter_company_products(
+                        df_csv, 
+                        connect_catalog_df, 
+                        selected_shop=selected_shop if csv_type == 'company' else None,
+                        csv_type=csv_type
+                    )
                     if filtered_csv is not None:
-                        filtered_csv = add_catalog_location_mapping(filtered_csv)
+                        filtered_csv = add_catalog_location_mapping(
+                            filtered_csv, 
+                            csv_type=csv_type,
+                            selected_shop=selected_shop
+                        )
                         filtered_csv = normalize_categories(filtered_csv)
                         
                         if connect_catalog_df is not None:
@@ -988,12 +1193,17 @@ def main():
                             filtered_csv = add_simple_price_comparison(filtered_csv, connect_catalog_df)
                         
                         st.session_state['df_csv'] = filtered_csv
-                        st.session_state['df_csv_name'] = csv_name
-                        st.success(f"✅ Processed Company Products: {filtered_csv.shape[0]} products after filtering, matching, and price comparison")
+                        csv_display_name = f"{csv_type.title()} Products"
+                        if csv_type == 'company' and selected_shop and selected_shop != 'All Shops':
+                            csv_display_name += f" - {selected_shop}"
+                        elif csv_type == 'shop' and selected_shop:
+                            csv_display_name += f" - {selected_shop}"
+                        st.session_state['df_csv_name'] = csv_display_name
+                        st.success(f"✅ Processed {csv_display_name}: {filtered_csv.shape[0]} products after filtering, matching, and price comparison")
                     else:
-                        st.error("❌ Failed to process Company Products")
+                        st.error("❌ Failed to process Products CSV")
                 else:
-                    st.error("❌ Failed to load Company Products CSV")
+                    st.error("❌ Failed to load Products CSV")
             
             # Summary
             loaded_sources = 0
@@ -1013,7 +1223,7 @@ def main():
         # Build tab list dynamically
         tab_names = ["📊 Overview"]
         if 'df_csv' in st.session_state:
-            tab_names.append("📄 Company Products")
+            tab_names.append("📄 Products")
             if 'Catalog_Match_Found' in st.session_state['df_csv'].columns and st.session_state['df_csv']['Catalog_Match_Found'].sum() > 0:
                 tab_names.append("💰 Price Inspector")
             if hasattr(st.session_state['df_csv'], 'troubleshooting_data'):
@@ -1089,15 +1299,15 @@ def main():
                         st.write(f"• **{len(matched_with_prices) - price_issues:,} products** have consistent pricing")
                         st.write(f"• Use the **Price Inspector** tab to review and export products needing fixes")
             else:
-                st.info("Upload your Company Products CSV to see pricing analysis")
+                st.info("Upload your Products CSV to see pricing analysis")
         
         tab_index += 1
         
-        # Company Products Tab
+        # Products Tab
         if 'df_csv' in st.session_state:
             with tabs[tab_index]:
                 st.subheader(f"📄 {st.session_state['df_csv_name']}")
-                st.info("Filtered and processed company product data with smart matching and price comparison")
+                st.info("Filtered and processed product data with smart matching and price comparison")
                 
                 df_csv = st.session_state['df_csv']
                 
@@ -1127,10 +1337,19 @@ def main():
                 # Download button
                 csv_buffer = io.StringIO()
                 df_csv.to_csv(csv_buffer, index=False)
+                
+                filename = "products_with_price_comparison.csv"
+                if st.session_state.get('csv_type') == 'company' and st.session_state.get('selected_shop'):
+                    shop_name = st.session_state['selected_shop'].replace(' ', '_').replace('-', '_')
+                    filename = f"products_{shop_name}_with_price_comparison.csv"
+                elif st.session_state.get('csv_type') == 'shop' and st.session_state.get('selected_shop'):
+                    shop_name = st.session_state['selected_shop'].replace(' ', '_').replace('-', '_')
+                    filename = f"products_{shop_name}_with_price_comparison.csv"
+                
                 st.download_button(
-                    label="📥 Download Processed Company Products",
+                    label="📥 Download Processed Products",
                     data=csv_buffer.getvalue(),
-                    file_name="company_products_with_price_comparison.csv",
+                    file_name=filename,
                     mime="text/csv"
                 )
             tab_index += 1
@@ -1336,14 +1555,20 @@ def main():
     
     else:
         # Welcome screen
-        st.info("👆 Upload your Company Products CSV in the sidebar and click 'Load Data' to get started")
+        st.info("👆 Upload your Products CSV in the sidebar to get started")
         
         st.subheader("📄 Data Processing Workflow")
         
         st.markdown(f"""
         **🎯 Product Price Checker v{VERSION} Features:**
         
-        1. **📄 Company Products (CSV Upload)**
+        1. **📄 Automatic CSV Type Detection**
+           - ✅ Auto-detects Company Export (multi-shop) or Shop Export (single-shop)
+           - ✅ Company Export: Select specific shop or process all shops
+           - ✅ Shop Export: Identify which shop the data is from
+           - ✅ Same filtering and matching logic for both types
+        
+        2. **📋 Smart Processing**
            - ✅ Filters out inactive products (Active ≠ "No"/"False")
            - ✅ Excludes unwanted categories (Display, Clones, Apparel, etc.)
            - ✅ Cross-references with brands from Product Catalog
@@ -1352,7 +1577,7 @@ def main():
            - ✅ Weight and pack size extraction for enhanced matching
            - ✅ Price comparison for matched products
         
-        2. **📋 Connect Product Catalog (Auto-loaded)**
+        3. **📋 Connect Product Catalog (Auto-loaded)**
            - ✅ Reference data for lookups and brand extraction
            - ✅ Brand column contains the master brand list
            - ✅ Profile Template column used for smart matching
