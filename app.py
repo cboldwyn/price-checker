@@ -1,9 +1,18 @@
 """
-Product Price Checker v4.1.1
+Product Price Checker v4.1.3
 Smart brand matching and price comparison tool for cannabis retail products
 Now with automatic CSV type detection and shop filtering
 
 CHANGELOG:
+v4.1.3 (2025-01-XX)
+- Fixed shop name mapping for Corona (HAVEN - Corona vs Haven - Corona)
+
+v4.1.2 (2025-01-XX)
+- Fixed weight extraction to handle weights not at end of string (e.g., "3.75g 5pk")
+- Fixed pack size extraction to handle both "5pk 3.75g" and "3.75g 5pk" formats
+- Improved preroll matching logic to prioritize pack size over weight
+- Pack size now correctly acts as strong distinguishing characteristic
+
 v4.1.1 (2025-01-XX)
 - Fixed CSV type detection display issues
 - Added version number display in sidebar
@@ -36,13 +45,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Configure page
 st.set_page_config(
-    page_title="Product Price Checker v4.1.1",
+    page_title="Product Price Checker v4.1.3",
     page_icon="🛒",
     layout="wide"
 )
 
 # Configuration
-VERSION = "4.1.1"
+VERSION = "4.1.3"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -57,7 +66,7 @@ SHOP_NAME_MAPPING = {
     'HAVEN - Lakewood': 'Lakewood',
     'HAVEN - Orange County': 'Stanton',
     'HAVEN - Fresno': 'Fresno',
-    'Haven - Corona': 'Corona'
+    'HAVEN - Corona': 'Corona'
 }
 
 # Exact match brands that require product-level matching
@@ -100,7 +109,9 @@ def extract_weight_from_item(item_text):
         return None
     
     item_str = str(item_text).strip()
-    weight_patterns = [
+    
+    # Try patterns at end of string first (most common)
+    end_patterns = [
         r'(\d+\.?\d*g)$',
         r'(\d+\.\d+\s?oz?)$',
         r'(\d+\s?oz?)$',
@@ -109,7 +120,22 @@ def extract_weight_from_item(item_text):
         r'(1/2\s?oz?)$',
     ]
     
-    for pattern in weight_patterns:
+    for pattern in end_patterns:
+        match = re.search(pattern, item_str, re.IGNORECASE)
+        if match:
+            return match.group(1).lower().replace(' ', '')
+    
+    # If not found at end, try finding anywhere in string (for cases like "3.75g 5pk")
+    anywhere_patterns = [
+        r'(\d+\.?\d*g)',
+        r'(\d+\.\d+\s?oz?)',
+        r'(\d+\s?oz?)',
+        r'(1/8\s?oz?)',
+        r'(1/4\s?oz?)',
+        r'(1/2\s?oz?)',
+    ]
+    
+    for pattern in anywhere_patterns:
         match = re.search(pattern, item_str, re.IGNORECASE)
         if match:
             return match.group(1).lower().replace(' ', '')
@@ -117,21 +143,41 @@ def extract_weight_from_item(item_text):
     return None
 
 def extract_pack_size_from_item(item_text):
-    """Extract pack size from item text (e.g., "OG Kush 3pk 1.5g" → "3pk")"""
+    """Extract pack size from item text (e.g., "OG Kush 3pk 1.5g" or "OG Kush 1.5g 3pk" → "3pk")"""
     if pd.isna(item_text):
         return None
     
     item_str = str(item_text).strip()
-    pack_patterns = [
+    
+    # Pattern 1: Pack before weight (e.g., "3pk 1.5g")
+    pack_before_weight_patterns = [
         r'(\d+pk)\s+\d+\.?\d*g',
         r'(\d+pk)\s+\d+\s?oz',
         r'(\d+pk)\s+1/[248]\s?oz',
     ]
     
-    for pattern in pack_patterns:
+    for pattern in pack_before_weight_patterns:
         match = re.search(pattern, item_str, re.IGNORECASE)
         if match:
             return match.group(1).lower()
+    
+    # Pattern 2: Weight before pack (e.g., "1.5g 3pk" or "1.5g3pk")
+    weight_before_pack_patterns = [
+        r'\d+\.?\d*g\s*(\d+pk)',
+        r'\d+\s?oz\s*(\d+pk)',
+        r'1/[248]\s?oz\s*(\d+pk)',
+    ]
+    
+    for pattern in weight_before_pack_patterns:
+        match = re.search(pattern, item_str, re.IGNORECASE)
+        if match:
+            return match.group(1).lower()
+    
+    # Pattern 3: Standalone pack size anywhere (fallback)
+    standalone_pattern = r'(\d+pk)'
+    match = re.search(standalone_pattern, item_str, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
     
     return None
 
@@ -767,7 +813,7 @@ def match_flower_products(row, templates):
     return (current_templates[0], match_steps) if len(current_templates) == 1 else (None, [])
 
 def match_preroll_products(row, templates):
-    """Advanced matching for preroll products using infused status, weight, pack size, and keywords"""
+    """Advanced matching for preroll products using infused status, pack size, weight, and keywords"""
     # Filter by infused status first
     company_has_infused = 'infused' in str(row['Item']).lower()
     
@@ -782,6 +828,19 @@ def match_preroll_products(row, templates):
     if infused_filtered_templates:
         match_steps.append(f"infused: {'yes' if company_has_infused else 'no'}")
     
+    # Filter by pack size FIRST (before weight) - pack size is very distinctive for prerolls
+    company_pack = row.get('Extracted_Pack_Size')
+    if company_pack and len(current_templates) > 1:
+        pack_matched_templates = []
+        for template in current_templates:
+            catalog_pack = extract_pack_size_from_item(template)
+            if catalog_pack == company_pack:
+                pack_matched_templates.append(template)
+        
+        if pack_matched_templates:
+            current_templates = pack_matched_templates
+            match_steps.append(f"pack: {company_pack}")
+    
     # Filter by weight
     company_weight = row.get('Extracted_Weight')
     if company_weight and len(current_templates) > 1:
@@ -795,19 +854,8 @@ def match_preroll_products(row, templates):
             current_templates = weight_matched_templates
             match_steps.append(f"weight: {company_weight}")
     
-    # Filter by pack size
-    company_pack = row.get('Extracted_Pack_Size')
-    if company_pack and len(current_templates) > 1:
-        pack_matched_templates = []
-        for template in current_templates:
-            catalog_pack = extract_pack_size_from_item(template)
-            if catalog_pack == company_pack:
-                pack_matched_templates.append(template)
-        
-        if pack_matched_templates:
-            current_templates = pack_matched_templates
-            match_steps.append(f"pack: {company_pack}")
-    elif not company_pack and len(current_templates) > 1:
+    # If no pack size in company product but still multiple templates, prefer templates without pack
+    if not company_pack and len(current_templates) > 1:
         # Fallback: prefer templates without pack sizes
         no_pack_templates = []
         for template in current_templates:
@@ -1127,11 +1175,18 @@ def main():
     # Add changelog expander
     with st.sidebar.expander("📋 Version History & Changelog"):
         st.markdown("""
-        **v4.1.1** (Current)
+        **v4.1.3** (Current)
+        - Fixed Corona shop name mapping
+        
+        **v4.1.2**
+        - Fixed weight/pack extraction for formats like "3.75g 5pk"
+        - Improved preroll matching (pack size prioritized)
+        - Better handling of mixed weight/pack formats
+        
+        **v4.1.1**
         - Fixed CSV type detection display
         - Added version number in sidebar
         - Enhanced shop selector visibility
-        - Improved detection messaging
         
         **v4.1.0**
         - Auto CSV type detection
@@ -1149,7 +1204,7 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"**Version {VERSION}**")
     
-    if st.sidebar.button("🚀 Load Data", type="primary", disabled=(uploaded_file is None or st.session_state['selected_shop'] is None)):
+    if st.sidebar.button("🚀 Load Data", type="primary", disabled=(uploaded_file is None or st.session_state['csv_type'] is None or st.session_state['selected_shop'] is None)):
         with st.spinner("Loading data from all sources..."):
             
             # Load Product Catalog
