@@ -1,9 +1,20 @@
 """
-Product Price Checker v4.2.2
+Product Price Checker v4.2.4
 Smart brand matching and price comparison tool for cannabis retail products
 Now with automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.2.4 (2025-11-13)
+- Added Catalog Template filter to Price Inspector
+- Added Category filter to Price Inspector
+- Enhanced filtering capabilities for better price analysis
+
+v4.2.3 (2025-11-13)
+- CRITICAL FIX: Deduplicate catalog templates to fix Stiiizy and other multi-status brands
+- Added wildcard matching for COLOR, STRAIN, FLAVOR patterns
+- Wildcard matching runs after exact match but before auto-matching
+- Fixes products like "Plug Play - Blue Steel Battery" to match "Plug Play - COLOR Steel Battery"
+
 v4.2.2 (2025-11-13)
 - Fixed DtypeWarning by adding low_memory=False to CSV reads
 - Fixed pandas attribute warning by storing troubleshooting data in session state
@@ -65,13 +76,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Configure page
 st.set_page_config(
-    page_title="Product Price Checker v4.2.2",
+    page_title="Product Price Checker v4.2.4",
     page_icon="🛒",
     layout="wide"
 )
 
 # Configuration
-VERSION = "4.2.2"
+VERSION = "4.2.4"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -284,6 +295,66 @@ def extract_gid_from_url(sheet_url):
     except:
         pass
     return None
+
+def match_placeholder_pattern(product_name, template_name):
+    """
+    Check if a product name matches a template with placeholder patterns
+    
+    Handles placeholders like:
+    - STRAIN (any strain name)
+    - COLOR (any color)
+    - FLAVOR (any flavor)
+    - SIZE (any size)
+    
+    Args:
+        product_name: Actual product name (e.g., "Plug Play - Blue Steel Battery")
+        template_name: Template with placeholder (e.g., "Plug Play - COLOR Steel Battery")
+    
+    Returns:
+        bool: True if product matches template pattern
+    
+    Examples:
+        >>> match_placeholder_pattern("Plug Play - Blue Steel Battery", "Plug Play - COLOR Steel Battery")
+        True
+        >>> match_placeholder_pattern("Camino - Watermelon Lemonade Gummies", "Camino - FLAVOR Gummies")
+        True
+    """
+    if pd.isna(product_name) or pd.isna(template_name):
+        return False
+    
+    # Known placeholder patterns
+    placeholders = ['STRAIN', 'COLOR', 'FLAVOR', 'SIZE', 'VARIANT']
+    
+    # Check if template has any placeholders
+    has_placeholder = any(placeholder in str(template_name).upper() for placeholder in placeholders)
+    if not has_placeholder:
+        return False
+    
+    # Convert to uppercase for comparison
+    product_upper = str(product_name).upper()
+    template_upper = str(template_name).upper()
+    
+    # For each placeholder, try to match
+    for placeholder in placeholders:
+        if placeholder in template_upper:
+            # Split template by placeholder
+            parts = template_upper.split(placeholder)
+            
+            if len(parts) != 2:
+                continue  # Skip if placeholder appears multiple times
+            
+            prefix, suffix = parts
+            
+            # Check if product starts with prefix and ends with suffix
+            if product_upper.startswith(prefix) and product_upper.endswith(suffix):
+                # Extract what's in place of placeholder
+                placeholder_value = product_upper[len(prefix):-len(suffix) if suffix else len(product_upper)]
+                
+                # Placeholder value should not be empty and should be reasonable length
+                if placeholder_value and len(placeholder_value.strip()) > 0 and len(placeholder_value.strip()) < 50:
+                    return True
+    
+    return False
 
 @st.cache_data
 def load_google_sheet_data(sheet_url, load_all_for_matching=False):
@@ -560,6 +631,58 @@ def normalize_categories(df):
 # [MATCHING FUNCTIONS CONTINUE - Same as original, keeping all the smart matching logic]
 # I'll include the key functions here but they remain unchanged from v4.1.3
 
+
+def match_wildcard_template(item_text, template, wildcards=['COLOR', 'STRAIN', 'FLAVOR']):
+    """
+    Match item against template with wildcards (COLOR, STRAIN, FLAVOR)
+    Returns (match_found, extracted_values) tuple
+    
+    Example:
+        item: "Plug Play - Blue Steel Battery"
+        template: "Plug Play - COLOR Steel Battery"
+        returns: (True, {'COLOR': 'Blue'})
+    """
+    if pd.isna(item_text) or pd.isna(template):
+        return False, {}
+    
+    item_str = str(item_text).strip()
+    template_str = str(template).strip()
+    
+    # Find all wildcard positions in template
+    wildcard_positions = {}
+    for wildcard in wildcards:
+        if wildcard in template_str:
+            wildcard_positions[wildcard] = template_str.find(wildcard)
+    
+    if not wildcard_positions:
+        return False, {}
+    
+    # Create regex pattern from template
+    # Escape special regex characters except wildcards
+    pattern = re.escape(template_str)
+    
+    # Replace escaped wildcards with capture groups
+    # Match one or more words (can be multi-word like "Blue Dream")
+    for wildcard in wildcards:
+        escaped_wildcard = re.escape(wildcard)
+        if escaped_wildcard in pattern:
+            # Match word characters, spaces, and hyphens (for strain/flavor names)
+            pattern = pattern.replace(escaped_wildcard, r'([\w\s\-]+?)', 1)
+    
+    # Try to match
+    match = re.match(pattern + r'\s*$', item_str, re.IGNORECASE)
+    
+    if match:
+        # Extract the wildcard values
+        extracted_values = {}
+        wildcard_list = sorted(wildcard_positions.items(), key=lambda x: x[1])
+        for i, (wildcard, _) in enumerate(wildcard_list, 1):
+            if i <= len(match.groups()):
+                extracted_values[wildcard] = match.group(i).strip()
+        return True, extracted_values
+    
+    return False, {}
+
 def add_smart_brand_matching(company_df, catalog_df):
     """Smart brand-based matching using actual catalog structure"""
     if company_df is None or catalog_df is None:
@@ -584,14 +707,17 @@ def add_smart_brand_matching(company_df, catalog_df):
         category = cat_row.get('Category', 'Unknown')
         
         if pd.notna(brand) and pd.notna(template) and str(template).strip():
+            # CRITICAL FIX: Only add template if not already in list (deduplicates across Active/New Price statuses)
             if brand not in brand_catalog_map:
                 brand_catalog_map[brand] = []
-            brand_catalog_map[brand].append(template)
+            if template not in brand_catalog_map[brand]:
+                brand_catalog_map[brand].append(template)
             
             brand_category_key = f"{brand}|{category}"
             if brand_category_key not in brand_category_catalog_map:
                 brand_category_catalog_map[brand_category_key] = []
-            brand_category_catalog_map[brand_category_key].append(template)
+            if template not in brand_category_catalog_map[brand_category_key]:
+                brand_category_catalog_map[brand_category_key].append(template)
     
     # Categorize brands by complexity
     single_entry_brands = {}
@@ -633,6 +759,7 @@ def add_smart_brand_matching(company_df, catalog_df):
     
     # Perform matching
     exact_matches = 0
+    wildcard_matches = 0
     single_entry_matches = 0
     brand_category_matches = 0
     flower_weight_matches = 0
@@ -687,10 +814,54 @@ def add_smart_brand_matching(company_df, catalog_df):
                     })
                     break
         
+        # 2. Try placeholder pattern match (NEW!)
+        if not match_found and brand in brand_catalog_map:
+            for template in brand_catalog_map[brand]:
+                if match_placeholder_pattern(item, template):
+                    matched_df.at[idx, 'Catalog_Match_Found'] = True
+                    matched_df.at[idx, 'Catalog_Template'] = template
+                    matched_df.at[idx, 'Match_Type'] = 'placeholder_pattern'
+                    matched_df.at[idx, 'Match_Strategy'] = 'placeholder_pattern'
+                    exact_matches += 1  # Count with exact matches since it's very reliable
+                    match_found = True
+                    troubleshooting_data.append({
+                        'Brand': brand,
+                        'Item': item,
+                        'Shop': shop,
+                        'Match_Status': 'Placeholder pattern match',
+                        'Catalog_Template': template,
+                        'Catalog_Options': f"{len(brand_catalog_map[brand])} options",
+                        'Notes': 'Matched via placeholder (COLOR, STRAIN, FLAVOR, etc.)'
+                    })
+                    break
+        
+        # 2. Try wildcard match (NEW - FIX #2)
+        if not match_found and brand in brand_catalog_map:
+            for template in brand_catalog_map[brand]:
+                is_wildcard_match, extracted_wildcards = match_wildcard_template(item, template)
+                if is_wildcard_match:
+                    matched_df.at[idx, 'Catalog_Match_Found'] = True
+                    matched_df.at[idx, 'Catalog_Template'] = template
+                    matched_df.at[idx, 'Match_Type'] = 'wildcard'
+                    matched_df.at[idx, 'Match_Strategy'] = 'wildcard'
+                    matched_df.at[idx, 'Match_Keywords'] = ', '.join([f"{k}={v}" for k, v in extracted_wildcards.items()])
+                    wildcard_matches += 1
+                    match_found = True
+                    troubleshooting_data.append({
+                        'Brand': brand,
+                        'Item': item,
+                        'Shop': shop,
+                        'Match_Status': 'Wildcard match',
+                        'Catalog_Template': template,
+                        'Catalog_Options': f"{len(brand_catalog_map[brand])} options",
+                        'Notes': f'Matched wildcards: {", ".join([f"{k}={v}" for k, v in extracted_wildcards.items()])}'
+                    })
+                    break
+        
         # Skip auto-matching for exact product match brands
         skip_auto_matching = brand in EXACT_PRODUCT_MATCH_BRANDS
         
-        # 2. Try single entry brand auto-match
+        # 3. Try single entry brand auto-match
         if not match_found and not skip_auto_matching and brand in filtered_single_entry_brands:
             template = filtered_single_entry_brands[brand]
             matched_df.at[idx, 'Catalog_Match_Found'] = True
@@ -709,7 +880,7 @@ def add_smart_brand_matching(company_df, catalog_df):
                 'Notes': 'Auto-matched to only catalog option'
             })
         
-        # 3. Try brand+category auto-match
+        # 4. Try brand+category auto-match
         if not match_found and not skip_auto_matching:
             brand_category_key = f"{brand}|{category}"
             if brand_category_key in filtered_single_entry_brand_categories:
@@ -730,7 +901,7 @@ def add_smart_brand_matching(company_df, catalog_df):
                     'Notes': f'Auto-matched to only {category} option for {brand}'
                 })
         
-        # 4. Try advanced weight/keyword matching for complex categories
+        # 5. Try advanced weight/keyword matching for complex categories
         if not match_found and category in ['Flower', 'Preroll', 'Vape', 'Extract'] and brand in multiple_entry_brands:
             brand_category_key = f"{brand}|{category}"
             if brand_category_key in multiple_entry_brand_categories:
@@ -778,27 +949,32 @@ def add_smart_brand_matching(company_df, catalog_df):
     progress_bar.progress(1.0)
     
     # Show results
-    total_matches = exact_matches + single_entry_matches + brand_category_matches + flower_weight_matches + preroll_matches + vape_extract_matches
+    total_matches = exact_matches + wildcard_matches + single_entry_matches + brand_category_matches + flower_weight_matches + preroll_matches + vape_extract_matches
     total_match_rate = (total_matches / len(matched_df)) * 100 if len(matched_df) > 0 else 0
     
     st.success(f"🎉 Enhanced Matching Results:")
+    
+    # Count placeholder pattern matches separately
+    placeholder_pattern_count = matched_df[matched_df['Match_Type'] == 'placeholder_pattern'].shape[0]
+    exact_only_count = exact_matches - placeholder_pattern_count
+    
     col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
     with col1:
-        st.metric("🎯 Exact", f"{exact_matches:,}")
+        st.metric("🎯 Exact", f"{exact_only_count:,}")
     with col2:
-        st.metric("1️⃣ Single Brand", f"{single_entry_matches:,}")
+        st.metric("🔤 Pattern", f"{placeholder_pattern_count:,}", help="COLOR, STRAIN, FLAVOR placeholders")
     with col3:
-        st.metric("📂 Brand+Category", f"{brand_category_matches:,}")
+        st.metric("1️⃣ Single", f"{single_entry_matches:,}")
     with col4:
-        st.metric("🌸 Flower", f"{flower_weight_matches:,}")
+        st.metric("📂 Category", f"{brand_category_matches:,}")
     with col5:
-        st.metric("🚬 Preroll", f"{preroll_matches:,}")
+        st.metric("🌸 Flower", f"{flower_weight_matches:,}")
     with col6:
-        st.metric("💨 Vape/Extract", f"{vape_extract_matches:,}")
+        st.metric("🚬 Preroll", f"{preroll_matches:,}")
     with col7:
-        st.metric("📊 Total", f"{total_matches:,}")
+        st.metric("💨 Vape/Ext", f"{vape_extract_matches:,}")
     with col8:
-        st.metric("📈 Rate", f"{total_match_rate:.1f}%")
+        st.metric("📊 Total", f"{total_matches:,} ({total_match_rate:.1f}%)")
     
     # Store troubleshooting data in session state instead of as DataFrame attribute
     st.session_state['troubleshooting_data'] = pd.DataFrame(troubleshooting_data)
@@ -1268,7 +1444,17 @@ def main():
     # Add changelog expander
     with st.sidebar.expander("📋 Version History & Changelog"):
         st.markdown("""
-        **v4.2.2** (Current - 2025-11-13)
+        **v4.2.4** (Current - 2025-11-13)
+        - 🔍 NEW: Catalog Template filter in Price Inspector
+        - 🔍 NEW: Category filter in Price Inspector
+        - ✅ Enhanced filtering for price analysis
+        
+        **v4.2.3** (2025-11-13)
+        - 🔧 CRITICAL FIX: Deduplicate catalog templates for Stiiizy
+        - 🎨 NEW: Wildcard matching for COLOR/STRAIN/FLAVOR
+        - ✅ Fixes "Plug Play - Blue Steel Battery" matching
+        
+        **v4.2.2** (2025-11-13)
         - Code cleanup: Fixed all warnings
         - DtypeWarning fixes
         - Pandas attribute warning fix
@@ -1443,23 +1629,25 @@ def main():
                     st.write("**🎯 Enhanced Matching Breakdown:**")
                     match_type_counts = df_csv[df_csv['Catalog_Match_Found'] == True]['Match_Type'].value_counts()
                     
-                    col1, col2, col3, col4, col5 = st.columns(5)
+                    col1, col2, col3, col4, col5, col6 = st.columns(6)
                     with col1:
                         exact_count = match_type_counts.get('exact', 0)
                         st.metric("🎯 Exact", f"{exact_count:,}")
                     with col2:
+                        pattern_count = match_type_counts.get('placeholder_pattern', 0)
+                        st.metric("🔤 Pattern", f"{pattern_count:,}")
+                    with col3:
                         auto_count = match_type_counts.get('brand_auto', 0) + match_type_counts.get('brand_category_auto', 0)
                         st.metric("⚡ Auto", f"{auto_count:,}")
-                    with col3:
-                        flower_count = match_type_counts.get('flower_weight_keywords', 0)
-                        preroll_count = match_type_counts.get('preroll_weight_keywords', 0)
-                        st.metric("🌸 Weight+Multi", f"{flower_count + preroll_count:,}")
                     with col4:
-                        vape_extract_count = match_type_counts.get('vape_weight_keywords', 0) + match_type_counts.get('extract_weight_keywords', 0)
-                        st.metric("💨 Vape/Extract", f"{vape_extract_count:,}")
+                        flower_preroll = match_type_counts.get('flower_weight_keywords', 0) + match_type_counts.get('preroll_weight_keywords', 0)
+                        st.metric("🌸 Weight+KW", f"{flower_preroll:,}")
                     with col5:
+                        vape_extract_count = match_type_counts.get('vape_weight_keywords', 0) + match_type_counts.get('extract_weight_keywords', 0)
+                        st.metric("💨 Vape/Ext", f"{vape_extract_count:,}")
+                    with col6:
                         total_matched = match_type_counts.sum()
-                        st.metric("📊 Total Matched", f"{total_matched:,}")
+                        st.metric("📊 Total", f"{total_matched:,}")
                 
                 # Pricing summary
                 if 'Retail_Price_Diff' in df_csv.columns:
@@ -1553,7 +1741,7 @@ def main():
                     
                     st.info("Review matched products and identify pricing discrepancies")
                     
-                    # Filters
+                    # Filters - Row 1
                     col1, col2, col3 = st.columns(3)
                     with col1:
                         show_price_issues_only = st.checkbox(
@@ -1582,6 +1770,29 @@ def main():
                         else:
                             selected_locations = None
                     
+                    # Filters - Row 2 (NEW)
+                    col4, col5 = st.columns(2)
+                    with col4:
+                        if 'Catalog_Template' in matched_data.columns:
+                            selected_templates = st.multiselect(
+                                "Filter by Catalog Template:",
+                                options=sorted(matched_data['Catalog_Template'].dropna().unique()),
+                                default=None,
+                                help="Filter to specific catalog product templates"
+                            )
+                        else:
+                            selected_templates = None
+                    with col5:
+                        if 'Category' in matched_data.columns:
+                            selected_categories = st.multiselect(
+                                "Filter by Category:",
+                                options=sorted(matched_data['Category'].dropna().unique()),
+                                default=None,
+                                help="Filter to specific product categories"
+                            )
+                        else:
+                            selected_categories = None
+                    
                     # Apply filters
                     filtered_matches = matched_data.copy()
                     
@@ -1605,6 +1816,10 @@ def main():
                         filtered_matches = filtered_matches[filtered_matches['Brand'].isin(selected_brands)]
                     if selected_locations and 'Catalog_Location' in filtered_matches.columns:
                         filtered_matches = filtered_matches[filtered_matches['Catalog_Location'].isin(selected_locations)]
+                    if selected_templates and 'Catalog_Template' in filtered_matches.columns:
+                        filtered_matches = filtered_matches[filtered_matches['Catalog_Template'].isin(selected_templates)]
+                    if selected_categories and 'Category' in filtered_matches.columns:
+                        filtered_matches = filtered_matches[filtered_matches['Category'].isin(selected_categories)]
                     
                     st.write(f"Showing {len(filtered_matches)} of {len(matched_data)} matched products")
                     
@@ -1644,6 +1859,10 @@ def main():
                                 filter_description.append(f"{len(selected_brands)} Brand(s)")
                             if selected_locations:
                                 filter_description.append(f"{len(selected_locations)} Location(s)")
+                            if selected_templates:
+                                filter_description.append(f"{len(selected_templates)} Template(s)")
+                            if selected_categories:
+                                filter_description.append(f"{len(selected_categories)} Category(s)")
                             
                             if filter_description:
                                 download_label = f"📥 Download Filtered Data ({', '.join(filter_description)})"
