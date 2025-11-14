@@ -1,9 +1,15 @@
 """
-Product Price Checker v4.2.4
+Product Price Checker v4.2.5
 Smart brand matching and price comparison tool for cannabis retail products
 Now with automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.2.5 (2025-11-13)
+- CRITICAL FIX: Changed Status filter from single to multi-select
+- Can now select multiple statuses: Active, New Price, New Product, etc.
+- Default includes Active + New Price + New Product (52 more products now get pricing!)
+- Fixes issue where products with "New Product" status had no catalog prices
+
 v4.2.4 (2025-11-13)
 - Added Catalog Template filter to Price Inspector
 - Added Category filter to Price Inspector
@@ -76,13 +82,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Configure page
 st.set_page_config(
-    page_title="Product Price Checker v4.2.4",
+    page_title="Product Price Checker v4.2.5",
     page_icon="🛒",
     layout="wide"
 )
 
 # Configuration
-VERSION = "4.2.4"
+VERSION = "4.2.5"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -1194,15 +1200,15 @@ def match_vape_extract_products(row, templates, category):
     
     return (current_templates[0], match_steps) if len(current_templates) == 1 else (None, [])
 
-def add_simple_price_comparison(company_df, catalog_df, selected_status='Active'):
+def add_simple_price_comparison(company_df, catalog_df, selected_statuses=['Active']):
     """
     Simple price comparison - add basic price difference columns
-    Only uses prices from catalog products with the selected status
+    Only uses prices from catalog products with the selected statuses
     
     Args:
         company_df: Products dataframe
         catalog_df: Full catalog (all statuses)
-        selected_status: Which status to use for pricing ('Active' or 'New Price')
+        selected_statuses: List of statuses to use for pricing (default: ['Active'])
     """
     if company_df is None or catalog_df is None:
         return company_df
@@ -1214,7 +1220,13 @@ def add_simple_price_comparison(company_df, catalog_df, selected_status='Active'
         return company_df
     
     st.info(f"💰 Adding price comparison for {len(matched_products):,} matched products...")
-    st.info(f"📅 Using prices from catalog status: **{selected_status}**")
+    
+    # Format status list for display
+    if len(selected_statuses) == 1:
+        status_display = f"**{selected_statuses[0]}**"
+    else:
+        status_display = f"**{', '.join(selected_statuses)}**"
+    st.info(f"📅 Using prices from catalog statuses: {status_display}")
     
     def clean_price(price_str):
         """Clean and convert price string to float"""
@@ -1233,16 +1245,20 @@ def add_simple_price_comparison(company_df, catalog_df, selected_status='Active'
     company_df['Sale_Price_Diff'] = None
     company_df['Catalog_Status_Used'] = None
     
-    # Build catalog lookup - but only for selected status
-    catalog_for_pricing = catalog_df[catalog_df['Status'] == selected_status].copy() if 'Status' in catalog_df.columns else catalog_df
+    # Build catalog lookup - filter by selected statuses (can be multiple)
+    catalog_for_pricing = catalog_df[catalog_df['Status'].isin(selected_statuses)].copy() if 'Status' in catalog_df.columns else catalog_df
     
-    st.info(f"🔍 {len(catalog_for_pricing)} catalog products have '{selected_status}' status for pricing")
+    st.info(f"🔍 {len(catalog_for_pricing)} catalog products have selected status(es) for pricing")
     
     catalog_lookup = {}
     for _, cat_row in catalog_for_pricing.iterrows():
         template = cat_row['Profile Template']
         if pd.notna(template):
-            catalog_lookup[template] = cat_row
+            # Store both the row data and which status it has
+            catalog_lookup[template] = {
+                'data': cat_row,
+                'status': cat_row.get('Status', 'Unknown')
+            }
     
     pricing_issues = 0
     matched_but_no_pricing = 0
@@ -1255,15 +1271,18 @@ def add_simple_price_comparison(company_df, catalog_df, selected_status='Active'
         if pd.isna(catalog_template) or pd.isna(catalog_location):
             continue
         
-        catalog_data = catalog_lookup.get(catalog_template)
+        catalog_entry = catalog_lookup.get(catalog_template)
         
-        if catalog_data is None:
-            # Product matched to a template, but that template doesn't have the selected status
+        if catalog_entry is None:
+            # Product matched to a template, but that template doesn't have any of the selected statuses
             matched_but_no_pricing += 1
-            company_df.at[idx, 'Catalog_Status_Used'] = f"No {selected_status} entry"
+            company_df.at[idx, 'Catalog_Status_Used'] = f"No matching status"
             continue
         
-        company_df.at[idx, 'Catalog_Status_Used'] = selected_status
+        # Get the catalog data and status
+        catalog_data = catalog_entry['data']
+        catalog_status = catalog_entry['status']
+        company_df.at[idx, 'Catalog_Status_Used'] = catalog_status
         
         # Get catalog prices for this location
         retail_price_col = f"{catalog_location} Retail Price"
@@ -1296,7 +1315,8 @@ def add_simple_price_comparison(company_df, catalog_df, selected_status='Active'
             pricing_issues += 1
     
     if matched_but_no_pricing > 0:
-        st.warning(f"⚠️ {matched_but_no_pricing} matched products don't have '{selected_status}' catalog entry (may have DNO or different status)")
+        status_list = ', '.join([f"'{s}'" for s in selected_statuses])
+        st.warning(f"⚠️ {matched_but_no_pricing} matched products don't have any of the selected statuses ({status_list})")
     
     st.success(f"💰 Price comparison complete! Found {pricing_issues:,} products with price differences > $0.01")
     
@@ -1309,18 +1329,27 @@ def main():
     st.sidebar.header("📊 Data Sources")
     
     # Add Status Filter at the top of sidebar
-    st.sidebar.subheader("📋 Catalog Price Source")
-    catalog_status = st.sidebar.radio(
-        "Which catalog prices to use:",
-        options=['Active', 'New Price'],
-        index=0,
-        help="Active = Current prices | New Price = Prices effective 11/14/2025"
+    st.sidebar.subheader("📋 Catalog Price Sources")
+    
+    # Define available statuses (most common first)
+    available_statuses = ['Active', 'New Price', 'New Product', 'DNO', 'REVIEW', 'On-boarding', 'Inactive']
+    
+    catalog_statuses = st.sidebar.multiselect(
+        "Which catalog statuses to use for pricing:",
+        options=available_statuses,
+        default=['Active', 'New Price', 'New Product'],
+        help="Select one or more catalog statuses. Products with these statuses will be used for price comparison."
     )
     
-    if catalog_status == 'New Price':
-        st.sidebar.info("📅 Using NEW PRICE catalog (effective 11/14/2025)")
+    if not catalog_statuses:
+        st.sidebar.warning("⚠️ Please select at least one status")
+        catalog_statuses = ['Active']
+    
+    # Show selected statuses
+    if len(catalog_statuses) == 1:
+        st.sidebar.info(f"✅ Using {catalog_statuses[0]} catalog prices")
     else:
-        st.sidebar.info("✅ Using ACTIVE catalog (current prices)")
+        st.sidebar.info(f"✅ Using {len(catalog_statuses)} statuses: {', '.join(catalog_statuses)}")
     
     st.sidebar.subheader("📄 Upload Products CSV")
     uploaded_file = st.sidebar.file_uploader(
@@ -1338,13 +1367,13 @@ def main():
         st.session_state['selected_shop'] = None
     if 'detection_complete' not in st.session_state:
         st.session_state['detection_complete'] = False
-    if 'catalog_status' not in st.session_state:
-        st.session_state['catalog_status'] = 'Active'
+    if 'catalog_statuses' not in st.session_state:
+        st.session_state['catalog_statuses'] = ['Active', 'New Price', 'New Product']
     
-    # Update catalog status in session state
-    if st.session_state.get('catalog_status') != catalog_status:
-        st.session_state['catalog_status'] = catalog_status
-        # Clear cached catalog data when status changes
+    # Update catalog statuses in session state
+    if st.session_state.get('catalog_statuses') != catalog_statuses:
+        st.session_state['catalog_statuses'] = catalog_statuses
+        # Clear cached catalog data when statuses change
         st.cache_data.clear()
     
     # Auto-detect CSV type when file is uploaded
@@ -1444,7 +1473,12 @@ def main():
     # Add changelog expander
     with st.sidebar.expander("📋 Version History & Changelog"):
         st.markdown("""
-        **v4.2.4** (Current - 2025-11-13)
+        **v4.2.5** (Current - 2025-11-13)
+        - 🔧 CRITICAL: Multi-status filter (was single radio)
+        - ✅ Can select Active + New Price + New Product
+        - 🎯 Fixes 52 products with "New Product" status
+        
+        **v4.2.4** (2025-11-13)
         - 🔍 NEW: Catalog Template filter in Price Inspector
         - 🔍 NEW: Category filter in Price Inspector
         - ✅ Enhanced filtering for price analysis
@@ -1496,7 +1530,10 @@ def main():
     # Add version at bottom of sidebar
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"**Version {VERSION}**")
-    st.sidebar.markdown(f"**Catalog Status: {catalog_status}**")
+    if len(catalog_statuses) == 1:
+        st.sidebar.markdown(f"**Catalog Status: {catalog_statuses[0]}**")
+    else:
+        st.sidebar.markdown(f"**Catalog Statuses: {', '.join(catalog_statuses)}**")
     
     if st.sidebar.button("🚀 Load Data", type="primary", disabled=(uploaded_file is None or st.session_state['csv_type'] is None or st.session_state['selected_shop'] is None)):
         with st.spinner("Loading data from all sources..."):
@@ -1511,7 +1548,7 @@ def main():
                     connect_catalog_df = catalog_df
                     st.session_state['df_catalog'] = connect_catalog_df
                     st.session_state['df_catalog_name'] = f"Connect Product Catalog ({catalog_ws_name})"
-                    st.session_state['df_catalog_status'] = catalog_status
+                    st.session_state['df_catalog_statuses'] = catalog_statuses
                     st.success(f"✅ Loaded Product Catalog: {connect_catalog_df.shape[0]} records (all statuses for matching)")
                 else:
                     st.error("❌ Failed to load Connect Product Catalog")
@@ -1541,8 +1578,8 @@ def main():
                         
                         if connect_catalog_df is not None:
                             filtered_csv = add_smart_brand_matching(filtered_csv, connect_catalog_df)
-                            # Pass the selected catalog status for price comparison
-                            filtered_csv = add_simple_price_comparison(filtered_csv, connect_catalog_df, selected_status=catalog_status)
+                            # Pass the selected catalog statuses for price comparison
+                            filtered_csv = add_simple_price_comparison(filtered_csv, connect_catalog_df, selected_statuses=catalog_statuses)
                         
                         st.session_state['df_csv'] = filtered_csv
                         csv_display_name = f"{csv_type.title()} Products"
@@ -1591,12 +1628,15 @@ def main():
             st.subheader("📊 Data Overview")
             
             # Show which catalog status is being used
-            if 'df_catalog_status' in st.session_state:
-                status_badge = st.session_state['df_catalog_status']
-                if status_badge == 'New Price':
-                    st.info("📅 Using **NEW PRICE** catalog (effective 11/14/2025)")
+            if 'df_catalog_statuses' in st.session_state:
+                status_list = st.session_state['df_catalog_statuses']
+                if len(status_list) == 1:
+                    if status_list[0] == 'New Price':
+                        st.info("📅 Using **NEW PRICE** catalog (effective 11/14/2025)")
+                    else:
+                        st.info(f"✅ Using **{status_list[0]}** catalog")
                 else:
-                    st.info("✅ Using **ACTIVE** catalog (current prices)")
+                    st.info(f"✅ Using **{len(status_list)} statuses**: {', '.join(status_list)}")
             
             if 'df_csv' in st.session_state:
                 df_csv = st.session_state['df_csv']
@@ -1732,12 +1772,15 @@ def main():
                     st.subheader("💰 Price Inspector")
                     
                     # Show which catalog status is being used
-                    if 'df_catalog_status' in st.session_state:
-                        status_display = st.session_state['df_catalog_status']
-                        if status_display == 'New Price':
-                            st.warning("📅 Showing prices from **NEW PRICE** catalog (effective 11/14/2025)")
+                    if 'df_catalog_statuses' in st.session_state:
+                        status_list = st.session_state['df_catalog_statuses']
+                        if len(status_list) == 1:
+                            if status_list[0] == 'New Price':
+                                st.warning("📅 Showing prices from **NEW PRICE** catalog (effective 11/14/2025)")
+                            else:
+                                st.info(f"✅ Showing prices from **{status_list[0]}** catalog")
                         else:
-                            st.info("✅ Showing prices from **ACTIVE** catalog (current prices)")
+                            st.info(f"✅ Showing prices from **{len(status_list)} statuses**: {', '.join(status_list)}")
                     
                     st.info("Review matched products and identify pricing discrepancies")
                     
@@ -1897,7 +1940,13 @@ def main():
                             blaze_csv = io.StringIO()
                             blaze_export.to_csv(blaze_csv, index=False)
                             
-                            catalog_status_label = st.session_state.get('df_catalog_status', 'Active')
+                            # Get status label for filename
+                            catalog_statuses_list = st.session_state.get('df_catalog_statuses', ['Active'])
+                            if len(catalog_statuses_list) == 1:
+                                catalog_status_label = catalog_statuses_list[0]
+                            else:
+                                catalog_status_label = 'multi_status'
+                            
                             blaze_filename = f"blaze_pos_update_{catalog_status_label.lower().replace(' ', '_')}_{len(blaze_export)}_products.csv"
                             
                             st.download_button(
