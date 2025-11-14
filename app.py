@@ -1373,17 +1373,23 @@ def add_simple_price_comparison(company_df, catalog_df, selected_statuses=['Acti
             # Company has price, catalog doesn't
             company_df.at[idx, 'Retail_Price_Diff'] = company_retail
         
-        # Sale Price Comparison - IMPROVED LOGIC
-        if catalog_sale is not None and company_sale is not None:
-            # Both have sale prices - calculate difference
+        # Sale Price Comparison - IMPROVED LOGIC with retail=sale handling
+        # First, check if company sale price equals retail price (means no actual sale)
+        company_has_real_sale = (company_sale is not None and 
+                         company_retail is not None and 
+                         abs(company_sale - company_retail) > 0.01)
+
+        if catalog_sale is not None and company_has_real_sale:
+            # Both have real sale prices - calculate difference
             company_df.at[idx, 'Sale_Price_Diff'] = company_sale - catalog_sale
-        elif catalog_sale is not None and company_sale is None:
-            # Catalog has sale price, company doesn't - this is an issue
+        elif catalog_sale is not None and not company_has_real_sale:
+            # Catalog has sale price, company doesn't (or company sale = retail) - this is an issue
             company_df.at[idx, 'Sale_Price_Diff'] = -catalog_sale
-        elif catalog_sale is None and company_sale is not None:
-            # Company has sale price, catalog doesn't - THIS IS YOUR ISSUE!
+        elif catalog_sale is None and company_has_real_sale:
+            # Company has real sale price, catalog doesn't - this is an issue
             company_df.at[idx, 'Sale_Price_Diff'] = company_sale
-        
+        # else: both None or (company sale = retail and catalog is None) - no difference, both mean "no sale"
+                
         # Count pricing issues (differences > $0.01)
         retail_diff = company_df.at[idx, 'Retail_Price_Diff']
         sale_diff = company_df.at[idx, 'Sale_Price_Diff']
