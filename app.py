@@ -820,50 +820,115 @@ def add_smart_brand_matching(company_df, catalog_df):
                     })
                     break
         
-        # 2. Try placeholder pattern match (NEW!)
+        # 2. Try placeholder pattern match - WITH SPECIFICITY SCORING
         if not match_found and brand in brand_catalog_map:
+            placeholder_candidates = []
+            
+            # Collect ALL placeholder pattern matches
             for template in brand_catalog_map[brand]:
                 if match_placeholder_pattern(item, template):
-                    matched_df.at[idx, 'Catalog_Match_Found'] = True
-                    matched_df.at[idx, 'Catalog_Template'] = template
-                    matched_df.at[idx, 'Match_Type'] = 'placeholder_pattern'
-                    matched_df.at[idx, 'Match_Strategy'] = 'placeholder_pattern'
-                    exact_matches += 1  # Count with exact matches since it's very reliable
-                    match_found = True
-                    troubleshooting_data.append({
-                        'Brand': brand,
-                        'Item': item,
-                        'Shop': shop,
-                        'Match_Status': 'Placeholder pattern match',
-                        'Catalog_Template': template,
-                        'Catalog_Options': f"{len(brand_catalog_map[brand])} options",
-                        'Notes': 'Matched via placeholder (COLOR, STRAIN, FLAVOR, etc.)'
+                    # Score by number of matching words (more specific = higher score)
+                    item_words = set(item.lower().split())
+                    template_words = set(template.lower().split())
+                    
+                    # Count how many non-placeholder words from template are in item
+                    placeholder_keywords = {'strain', 'color', 'flavor', 'size', 'variant'}
+                    template_meaningful_words = template_words - placeholder_keywords
+                    matching_word_count = len(template_meaningful_words & item_words)
+                    
+                    # Prefer templates with more matching words (more specific)
+                    specificity_score = matching_word_count
+                    
+                    placeholder_candidates.append({
+                        'template': template,
+                        'score': specificity_score,
+                        'matching_words': matching_word_count
                     })
-                    break
+            
+            # If we found matches, pick the MOST SPECIFIC one
+            if placeholder_candidates:
+                # Sort by specificity score (descending)
+                placeholder_candidates.sort(key=lambda x: x['score'], reverse=True)
+                best_match = placeholder_candidates[0]
+                
+                matched_df.at[idx, 'Catalog_Match_Found'] = True
+                matched_df.at[idx, 'Catalog_Template'] = best_match['template']
+                matched_df.at[idx, 'Match_Type'] = 'placeholder_pattern'
+                matched_df.at[idx, 'Match_Strategy'] = 'placeholder_specific'
+                exact_matches += 1
+                match_found = True
+                
+                # Note in troubleshooting if multiple candidates existed
+                notes = 'Matched via placeholder (COLOR, STRAIN, FLAVOR, etc.)'
+                if len(placeholder_candidates) > 1:
+                    notes += f' (chose most specific from {len(placeholder_candidates)} matches)'
+                
+                troubleshooting_data.append({
+                    'Brand': brand,
+                    'Item': item,
+                    'Shop': shop,
+                    'Match_Status': 'Placeholder pattern match (specific)',
+                    'Catalog_Template': best_match['template'],
+                    'Catalog_Options': f"{len(brand_catalog_map[brand])} options",
+                    'Notes': notes
+                })
         
-        # 2. Try wildcard match (NEW - FIX #2)
+# 2. Try wildcard match - WITH SPECIFICITY SCORING
         if not match_found and brand in brand_catalog_map:
+            wildcard_candidates = []
+            
+            # Collect ALL wildcard matches
             for template in brand_catalog_map[brand]:
                 is_wildcard_match, extracted_wildcards = match_wildcard_template(item, template)
                 if is_wildcard_match:
-                    matched_df.at[idx, 'Catalog_Match_Found'] = True
-                    matched_df.at[idx, 'Catalog_Template'] = template
-                    matched_df.at[idx, 'Match_Type'] = 'wildcard'
-                    matched_df.at[idx, 'Match_Strategy'] = 'wildcard'
-                    matched_df.at[idx, 'Match_Keywords'] = ', '.join([f"{k}={v}" for k, v in extracted_wildcards.items()])
-                    wildcard_matches += 1
-                    match_found = True
-                    troubleshooting_data.append({
-                        'Brand': brand,
-                        'Item': item,
-                        'Shop': shop,
-                        'Match_Status': 'Wildcard match',
-                        'Catalog_Template': template,
-                        'Catalog_Options': f"{len(brand_catalog_map[brand])} options",
-                        'Notes': f'Matched wildcards: {", ".join([f"{k}={v}" for k, v in extracted_wildcards.items()])}'
+                    # Score by number of matching words (more specific = higher score)
+                    item_words = set(item.lower().split())
+                    template_words = set(template.lower().split())
+                    
+                    # Count how many non-wildcard words from template are in item
+                    wildcard_placeholders = {'strain', 'color', 'flavor', 'size', 'variant'}
+                    template_meaningful_words = template_words - wildcard_placeholders
+                    matching_word_count = len(template_meaningful_words & item_words)
+                    
+                    # Prefer templates with more matching words (more specific)
+                    specificity_score = matching_word_count
+                    
+                    wildcard_candidates.append({
+                        'template': template,
+                        'wildcards': extracted_wildcards,
+                        'score': specificity_score,
+                        'matching_words': matching_word_count
                     })
-                    break
-        
+            
+            # If we found wildcard matches, pick the MOST SPECIFIC one
+            if wildcard_candidates:
+                # Sort by specificity score (descending)
+                wildcard_candidates.sort(key=lambda x: x['score'], reverse=True)
+                best_match = wildcard_candidates[0]
+                
+                matched_df.at[idx, 'Catalog_Match_Found'] = True
+                matched_df.at[idx, 'Catalog_Template'] = best_match['template']
+                matched_df.at[idx, 'Match_Type'] = 'wildcard'
+                matched_df.at[idx, 'Match_Strategy'] = 'wildcard_specific'
+                matched_df.at[idx, 'Match_Keywords'] = ', '.join([f"{k}={v}" for k, v in best_match['wildcards'].items()])
+                wildcard_matches += 1
+                match_found = True
+                
+                # Note in troubleshooting if multiple candidates existed
+                notes = f'Matched wildcards: {", ".join([f"{k}={v}" for k, v in best_match["wildcards"].items()])}'
+                if len(wildcard_candidates) > 1:
+                    notes += f' (chose most specific from {len(wildcard_candidates)} matches)'
+                
+                troubleshooting_data.append({
+                    'Brand': brand,
+                    'Item': item,
+                    'Shop': shop,
+                    'Match_Status': 'Wildcard match (specific)',
+                    'Catalog_Template': best_match['template'],
+                    'Catalog_Options': f"{len(brand_catalog_map[brand])} options",
+                    'Notes': notes
+                })
+                        
         # Skip auto-matching for exact product match brands
         skip_auto_matching = brand in EXACT_PRODUCT_MATCH_BRANDS
         
