@@ -1764,7 +1764,7 @@ def main():
                 )
             tab_index += 1
         
-        # Price Inspector Tab - WITH NEW BLAZE POS EXPORT
+        # Price Inspector Tab - WITH STATUS COLUMN AND PRICING FILTER
         if 'df_csv' in st.session_state and 'Catalog_Match_Found' in st.session_state['df_csv'].columns:
             matched_data = st.session_state['df_csv'][st.session_state['df_csv']['Catalog_Match_Found'] == True]
             if len(matched_data) > 0:
@@ -1797,6 +1797,12 @@ def main():
                             value=False,
                             help="Filter to only products with Inventory Available > 0"
                         )
+                        # ✅ NEW FILTER: Show only products with actual pricing
+                        show_with_pricing_only = st.checkbox(
+                            "Show Only Products With Pricing",
+                            value=False,
+                            help="Filter to only products that have catalog prices (exclude 'No matching status')"
+                        )
                     with col2:
                         selected_brands = st.multiselect(
                             "Filter by Brand:",
@@ -1813,7 +1819,7 @@ def main():
                         else:
                             selected_locations = None
                     
-                    # Filters - Row 2 (NEW)
+                    # Filters - Row 2
                     col4, col5 = st.columns(2)
                     with col4:
                         if 'Catalog_Template' in matched_data.columns:
@@ -1855,6 +1861,18 @@ def main():
                             in_stock_mask = inventory_numeric > 0
                             filtered_matches = filtered_matches[in_stock_mask]
                     
+                    # ✅ NEW: Filter to only products with actual pricing
+                    if show_with_pricing_only:
+                        if 'Catalog_Retail_Price' in filtered_matches.columns:
+                            has_retail = filtered_matches['Catalog_Retail_Price'].notna()
+                            has_sale = filtered_matches['Catalog_Sale_Price'].notna() if 'Catalog_Sale_Price' in filtered_matches.columns else pd.Series([False] * len(filtered_matches))
+                            has_pricing_mask = has_retail | has_sale
+                            before_pricing_filter = len(filtered_matches)
+                            filtered_matches = filtered_matches[has_pricing_mask]
+                            after_pricing_filter = len(filtered_matches)
+                            if before_pricing_filter > after_pricing_filter:
+                                st.caption(f"🚫 Excluded {before_pricing_filter - after_pricing_filter} products without pricing from selected status(es)")
+                    
                     if selected_brands:
                         filtered_matches = filtered_matches[filtered_matches['Brand'].isin(selected_brands)]
                     if selected_locations and 'Catalog_Location' in filtered_matches.columns:
@@ -1868,8 +1886,9 @@ def main():
                     
                     # Display filtered data
                     if len(filtered_matches) > 0:
+                        # ✅ UPDATED: Include Catalog_Status_Used column
                         display_columns = [
-                            'Product ID', 'Brand', 'Item', 'Catalog_Template', 'Catalog_Location', 'Inventory Available',
+                            'Product ID', 'Brand', 'Item', 'Catalog_Template', 'Catalog_Status_Used', 'Catalog_Location', 'Inventory Available',
                             'Unit Price', 'Catalog_Retail_Price', 'Retail_Price_Diff',
                             'Unit Sale Price', 'Catalog_Sale_Price', 'Sale_Price_Diff'
                         ]
@@ -1885,6 +1904,12 @@ def main():
                         
                         st.dataframe(display_df, width='stretch')
                         
+                        # Show warning if products are missing pricing
+                        if 'Catalog_Status_Used' in display_df.columns:
+                            no_pricing_count = (display_df['Catalog_Status_Used'] == 'No matching status').sum()
+                            if no_pricing_count > 0:
+                                st.warning(f"⚠️ {no_pricing_count} products matched to templates that don't have your selected status(es). Use 'Show Only Products With Pricing' filter to exclude them.")
+                        
                         # Download buttons row
                         col1, col2 = st.columns(2)
                         
@@ -1898,6 +1923,8 @@ def main():
                                 filter_description.append("Price Issues")
                             if show_in_stock_only:
                                 filter_description.append("In-Stock")
+                            if show_with_pricing_only:
+                                filter_description.append("With Pricing")
                             if selected_brands:
                                 filter_description.append(f"{len(selected_brands)} Brand(s)")
                             if selected_locations:
@@ -1922,23 +1949,59 @@ def main():
                             )
                         
                         with col2:
-                            # NEW: Blaze POS Export
+                            # Blaze POS Export (ALREADY UPDATED WITH PREVIOUS FIXES)
                             st.markdown("**🔄 Blaze POS Bulk Update**")
                             
-                            # Create Blaze POS format: Product ID, Retail Price, Sale Price
-                            blaze_export = filtered_matches[['Product ID']].copy()
+                            # Exclusion filter
+                            exclude_items = st.text_area(
+                                "🚫 Exclude Items (one per line):",
+                                height=100,
+                                help="Enter Item names to exclude from export (one per line). Partial matches supported."
+                            )
+                            
+                            # Parse exclusion list
+                            excluded_item_list = [item.strip() for item in exclude_items.split('\n') if item.strip()]
+                            
+                            # Create Blaze POS format - include Item for filtering
+                            blaze_export = filtered_matches[['Product ID', 'Item']].copy()
                             blaze_export['Retail Price'] = filtered_matches['Catalog_Retail_Price']
                             blaze_export['Sale Price'] = filtered_matches['Catalog_Sale_Price']
+                            
+                            # Apply exclusion filter
+                            exclude_mask = pd.Series([False] * len(blaze_export))
+                            if excluded_item_list:
+                                exclude_mask = blaze_export['Item'].apply(
+                                    lambda x: any(excluded in str(x) for excluded in excluded_item_list)
+                                )
+                                blaze_export = blaze_export[~exclude_mask]
+                                if exclude_mask.sum() > 0:
+                                    st.caption(f"🚫 Excluding {exclude_mask.sum()} items based on filter")
+                            
+                            # Remove Item column (was only needed for filtering)
+                            blaze_export = blaze_export.drop('Item', axis=1)
+                            
+                            # ✅ AUTO-EXCLUDE products without pricing
+                            before_pricing_exclusion = len(blaze_export)
+                            blaze_export = blaze_export[(blaze_export['Retail Price'].notna()) | (blaze_export['Sale Price'].notna())]
+                            after_pricing_exclusion = len(blaze_export)
+                            pricing_excluded = before_pricing_exclusion - after_pricing_exclusion
+                            
+                            if pricing_excluded > 0:
+                                st.caption(f"🚫 Auto-excluded {pricing_excluded} products without pricing")
                             
                             # Remove rows where Product ID is missing
                             blaze_export = blaze_export[blaze_export['Product ID'].notna()]
                             
-                            # Format prices properly (remove $ and ensure numeric)
-                            blaze_export['Retail Price'] = pd.to_numeric(blaze_export['Retail Price'], errors='coerce')
-                            blaze_export['Sale Price'] = pd.to_numeric(blaze_export['Sale Price'], errors='coerce')
+                            # Rename to ProductId (no space)
+                            blaze_export = blaze_export.rename(columns={'Product ID': 'ProductId'})
                             
+                            # Format prices to exactly 2 decimal places
+                            blaze_export['Retail Price'] = pd.to_numeric(blaze_export['Retail Price'], errors='coerce').round(2)
+                            blaze_export['Sale Price'] = pd.to_numeric(blaze_export['Sale Price'], errors='coerce').round(2)
+                            
+                            # Create CSV with proper float formatting
                             blaze_csv = io.StringIO()
-                            blaze_export.to_csv(blaze_csv, index=False)
+                            blaze_export.to_csv(blaze_csv, index=False, float_format='%.2f')
                             
                             # Get status label for filename
                             catalog_statuses_list = st.session_state.get('df_catalog_statuses', ['Active'])
@@ -1957,8 +2020,12 @@ def main():
                                 help=f"3-column format for Blaze POS bulk price updates using {catalog_status_label} prices"
                             )
                             
+                            # Updated caption
                             if len(blaze_export) < len(filtered_matches):
-                                st.caption(f"⚠️ {len(filtered_matches) - len(blaze_export)} products excluded due to missing Product ID")
+                                missing_id_count = filtered_matches['Product ID'].isna().sum()
+                                manual_excluded = exclude_mask.sum() if excluded_item_list else 0
+                                total_excluded = len(filtered_matches) - len(blaze_export)
+                                st.caption(f"⚠️ {total_excluded} products excluded ({missing_id_count} missing ID, {manual_excluded} filtered, {pricing_excluded} no pricing)")
                     else:
                         st.info("No products match the selected filters.")
                 
