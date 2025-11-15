@@ -1,9 +1,31 @@
 """
-Product Price Checker v4.2.5
+Product Price Checker v4.2.9
 Smart brand matching and price comparison tool for cannabis retail products
 Now with automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.2.9 (2025-11-14)
+- BUGFIX: Fixed FutureWarning about downcasting in Blaze POS export
+- Convert to numeric before fillna to avoid pandas deprecation warning
+- Code cleanup for production readiness
+
+v4.2.8 (2025-11-14)
+- ENHANCEMENT: Price Inspector filters now support Include/Exclude modes
+- Can now exclude specific brands/categories/templates/locations instead of selecting all others
+- Example: Exclude 1 brand instead of selecting 30+ brands to include
+- Makes filtering much more efficient for large datasets
+
+v4.2.7 (2025-11-14)
+- ENHANCEMENT: Blaze POS export now fills blank Sale Price with Retail Price
+- Required for Blaze bulk updater tool compatibility
+- Ensures all rows have both Retail Price and Sale Price populated
+
+v4.2.6 (2025-11-14)
+- CRITICAL FIX: Sale price comparison now checks numeric match FIRST
+- Fixes issue where matching sale prices showed differences due to sale=retail logic
+- Example: Unit Sale $5.99 matching Catalog Sale $5.99 now correctly shows 0 difference
+- Logic order: 1) Check numeric match, 2) Handle mismatches, 3) Apply sale=retail logic
+
 v4.2.5 (2025-11-13)
 - CRITICAL FIX: Changed Status filter from single to multi-select
 - Can now select multiple statuses: Active, New Price, New Product, etc.
@@ -82,13 +104,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Configure page
 st.set_page_config(
-    page_title="Product Price Checker v4.2.5",
+    page_title="Product Price Checker v4.2.9",
     page_icon="🛒",
     layout="wide"
 )
 
 # Configuration
-VERSION = "4.2.5"
+VERSION = "4.2.9"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -634,10 +656,6 @@ def normalize_categories(df):
     
     return df_copy
 
-# [MATCHING FUNCTIONS CONTINUE - Same as original, keeping all the smart matching logic]
-# I'll include the key functions here but they remain unchanged from v4.1.3
-
-
 def match_wildcard_template(item_text, template, wildcards=['COLOR', 'STRAIN', 'FLAVOR']):
     """
     Match item against template with wildcards (COLOR, STRAIN, FLAVOR)
@@ -873,7 +891,7 @@ def add_smart_brand_matching(company_df, catalog_df):
                     'Notes': notes
                 })
         
-# 2. Try wildcard match - WITH SPECIFICITY SCORING
+        # 3. Try wildcard match - WITH SPECIFICITY SCORING
         if not match_found and brand in brand_catalog_map:
             wildcard_candidates = []
             
@@ -932,7 +950,7 @@ def add_smart_brand_matching(company_df, catalog_df):
         # Skip auto-matching for exact product match brands
         skip_auto_matching = brand in EXACT_PRODUCT_MATCH_BRANDS
         
-        # 3. Try single entry brand auto-match
+        # 4. Try single entry brand auto-match
         if not match_found and not skip_auto_matching and brand in filtered_single_entry_brands:
             template = filtered_single_entry_brands[brand]
             matched_df.at[idx, 'Catalog_Match_Found'] = True
@@ -951,7 +969,7 @@ def add_smart_brand_matching(company_df, catalog_df):
                 'Notes': 'Auto-matched to only catalog option'
             })
         
-        # 4. Try brand+category auto-match
+        # 5. Try brand+category auto-match
         if not match_found and not skip_auto_matching:
             brand_category_key = f"{brand}|{category}"
             if brand_category_key in filtered_single_entry_brand_categories:
@@ -972,7 +990,7 @@ def add_smart_brand_matching(company_df, catalog_df):
                     'Notes': f'Auto-matched to only {category} option for {brand}'
                 })
         
-        # 5. Try advanced weight/keyword matching for complex categories
+        # 6. Try advanced weight/keyword matching for complex categories
         if not match_found and category in ['Flower', 'Preroll', 'Vape', 'Extract'] and brand in multiple_entry_brands:
             brand_category_key = f"{brand}|{category}"
             if brand_category_key in multiple_entry_brand_categories:
@@ -1373,23 +1391,28 @@ def add_simple_price_comparison(company_df, catalog_df, selected_statuses=['Acti
             # Company has price, catalog doesn't
             company_df.at[idx, 'Retail_Price_Diff'] = company_retail
         
-        # Sale Price Comparison - IMPROVED LOGIC with retail=sale handling
-        # First, check if company sale price equals retail price (means no actual sale)
-        company_has_real_sale = (company_sale is not None and 
-                         company_retail is not None and 
-                         abs(company_sale - company_retail) > 0.01)
-
-        if catalog_sale is not None and company_has_real_sale:
-            # Both have real sale prices - calculate difference
-            company_df.at[idx, 'Sale_Price_Diff'] = company_sale - catalog_sale
-        elif catalog_sale is not None and not company_has_real_sale:
-            # Catalog has sale price, company doesn't (or company sale = retail) - this is an issue
+        # Sale Price Comparison - v4.2.6 FIX: Check numeric match FIRST
+        if catalog_sale is not None and company_sale is not None:
+            # Both have sale price values - check if they match numerically
+            if abs(company_sale - catalog_sale) <= 0.01:
+                # Values match (within penny) - no difference regardless of whether it's a "real" sale
+                company_df.at[idx, 'Sale_Price_Diff'] = 0
+            else:
+                # Values don't match - show the difference
+                company_df.at[idx, 'Sale_Price_Diff'] = company_sale - catalog_sale
+        elif catalog_sale is not None and company_sale is None:
+            # Catalog has sale, company doesn't - issue
             company_df.at[idx, 'Sale_Price_Diff'] = -catalog_sale
-        elif catalog_sale is None and company_has_real_sale:
-            # Company has real sale price, catalog doesn't - this is an issue
-            company_df.at[idx, 'Sale_Price_Diff'] = company_sale
-        # else: both None or (company sale = retail and catalog is None) - no difference, both mean "no sale"
-                
+        elif catalog_sale is None and company_sale is not None:
+            # Check if company's sale price is a "real" sale (different from retail)
+            company_has_real_sale = (company_retail is not None and 
+                                     abs(company_sale - company_retail) > 0.01)
+            if company_has_real_sale:
+                # Company has real sale, catalog doesn't - issue
+                company_df.at[idx, 'Sale_Price_Diff'] = company_sale
+            # else: company sale = retail AND catalog is None - both mean "no sale", no difference
+        # else: both None - no difference
+        
         # Count pricing issues (differences > $0.01)
         retail_diff = company_df.at[idx, 'Retail_Price_Diff']
         sale_diff = company_df.at[idx, 'Sale_Price_Diff']
@@ -1559,7 +1582,29 @@ def main():
     # Add changelog expander
     with st.sidebar.expander("📋 Version History & Changelog"):
         st.markdown("""
-        **v4.2.5** (Current - 2025-11-13)
+        **v4.2.9** (Current - 2025-11-14)
+        - 🐛 BUGFIX: Fixed FutureWarning in Blaze export
+        - ✅ Eliminated pandas downcasting warning
+        - 🧹 Code cleanup for production
+        
+        **v4.2.8** (2025-11-14)
+        - 🎯 NEW: Include/Exclude modes for all Price Inspector filters
+        - ✅ Exclude 1 brand instead of selecting 30+ to include
+        - 📊 Makes filtering much more efficient
+        - 🔧 Works for Brand, Location, Template, Category filters
+        
+        **v4.2.7** (2025-11-14)
+        - 🔄 Blaze POS: Blank Sale Price → Retail Price
+        - ✅ Required for Blaze updater tool compatibility
+        - 📊 All exported rows have both prices populated
+        
+        **v4.2.6** (2025-11-14)
+        - 🔧 CRITICAL: Sale price comparison checks numeric match FIRST
+        - ✅ Matching values (within $0.01) show 0 difference
+        - 🎯 Fixes: $5.99 = $5.99 now shows 0, not -$5.99
+        - 📊 Logic: 1) Numeric match, 2) Mismatches, 3) Sale=retail
+        
+        **v4.2.5** (2025-11-13)
         - 🔧 CRITICAL: Multi-status filter (was single radio)
         - ✅ Can select Active + New Price + New Product
         - 🎯 Fixes 52 products with "New Product" status
@@ -1890,43 +1935,78 @@ def main():
                             help="Filter to only products that have catalog prices (exclude 'No matching status')"
                         )
                     with col2:
+                        # Brand filter with Include/Exclude mode
+                        brand_mode = st.selectbox(
+                            "Brand Filter Mode:",
+                            options=["Include", "Exclude"],
+                            index=0,
+                            key="brand_mode",
+                            help="Include: show only selected brands. Exclude: hide selected brands."
+                        )
                         selected_brands = st.multiselect(
-                            "Filter by Brand:",
+                            f"{'Include' if brand_mode == 'Include' else 'Exclude'} Brands:",
                             options=sorted(matched_data['Brand'].unique()),
                             default=None
                         )
                     with col3:
                         if 'Catalog_Location' in matched_data.columns:
+                            # Location filter with Include/Exclude mode
+                            location_mode = st.selectbox(
+                                "Location Filter Mode:",
+                                options=["Include", "Exclude"],
+                                index=0,
+                                key="location_mode",
+                                help="Include: show only selected locations. Exclude: hide selected locations."
+                            )
                             selected_locations = st.multiselect(
-                                "Filter by Location:",
+                                f"{'Include' if location_mode == 'Include' else 'Exclude'} Locations:",
                                 options=sorted(matched_data['Catalog_Location'].dropna().unique()),
                                 default=None
                             )
                         else:
                             selected_locations = None
+                            location_mode = "Include"
                     
                     # Filters - Row 2
                     col4, col5 = st.columns(2)
                     with col4:
                         if 'Catalog_Template' in matched_data.columns:
+                            # Template filter with Include/Exclude mode
+                            template_mode = st.selectbox(
+                                "Template Filter Mode:",
+                                options=["Include", "Exclude"],
+                                index=0,
+                                key="template_mode",
+                                help="Include: show only selected templates. Exclude: hide selected templates."
+                            )
                             selected_templates = st.multiselect(
-                                "Filter by Catalog Template:",
+                                f"{'Include' if template_mode == 'Include' else 'Exclude'} Catalog Templates:",
                                 options=sorted(matched_data['Catalog_Template'].dropna().unique()),
                                 default=None,
                                 help="Filter to specific catalog product templates"
                             )
                         else:
                             selected_templates = None
+                            template_mode = "Include"
                     with col5:
                         if 'Category' in matched_data.columns:
+                            # Category filter with Include/Exclude mode
+                            category_mode = st.selectbox(
+                                "Category Filter Mode:",
+                                options=["Include", "Exclude"],
+                                index=0,
+                                key="category_mode",
+                                help="Include: show only selected categories. Exclude: hide selected categories."
+                            )
                             selected_categories = st.multiselect(
-                                "Filter by Category:",
+                                f"{'Include' if category_mode == 'Include' else 'Exclude'} Categories:",
                                 options=sorted(matched_data['Category'].dropna().unique()),
                                 default=None,
                                 help="Filter to specific product categories"
                             )
                         else:
                             selected_categories = None
+                            category_mode = "Include"
                     
                     # Apply filters
                     filtered_matches = matched_data.copy()
@@ -1959,14 +2039,33 @@ def main():
                             if before_pricing_filter > after_pricing_filter:
                                 st.caption(f"🚫 Excluded {before_pricing_filter - after_pricing_filter} products without pricing from selected status(es)")
                     
+                    # Apply Brand filter (Include or Exclude mode)
                     if selected_brands:
-                        filtered_matches = filtered_matches[filtered_matches['Brand'].isin(selected_brands)]
+                        if brand_mode == "Include":
+                            filtered_matches = filtered_matches[filtered_matches['Brand'].isin(selected_brands)]
+                        else:  # Exclude mode
+                            filtered_matches = filtered_matches[~filtered_matches['Brand'].isin(selected_brands)]
+                    
+                    # Apply Location filter (Include or Exclude mode)
                     if selected_locations and 'Catalog_Location' in filtered_matches.columns:
-                        filtered_matches = filtered_matches[filtered_matches['Catalog_Location'].isin(selected_locations)]
+                        if location_mode == "Include":
+                            filtered_matches = filtered_matches[filtered_matches['Catalog_Location'].isin(selected_locations)]
+                        else:  # Exclude mode
+                            filtered_matches = filtered_matches[~filtered_matches['Catalog_Location'].isin(selected_locations)]
+                    
+                    # Apply Template filter (Include or Exclude mode)
                     if selected_templates and 'Catalog_Template' in filtered_matches.columns:
-                        filtered_matches = filtered_matches[filtered_matches['Catalog_Template'].isin(selected_templates)]
+                        if template_mode == "Include":
+                            filtered_matches = filtered_matches[filtered_matches['Catalog_Template'].isin(selected_templates)]
+                        else:  # Exclude mode
+                            filtered_matches = filtered_matches[~filtered_matches['Catalog_Template'].isin(selected_templates)]
+                    
+                    # Apply Category filter (Include or Exclude mode)
                     if selected_categories and 'Category' in filtered_matches.columns:
-                        filtered_matches = filtered_matches[filtered_matches['Category'].isin(selected_categories)]
+                        if category_mode == "Include":
+                            filtered_matches = filtered_matches[filtered_matches['Category'].isin(selected_categories)]
+                        else:  # Exclude mode
+                            filtered_matches = filtered_matches[~filtered_matches['Category'].isin(selected_categories)]
                     
                     st.write(f"Showing {len(filtered_matches)} of {len(matched_data)} matched products")
                     
@@ -2012,13 +2111,17 @@ def main():
                             if show_with_pricing_only:
                                 filter_description.append("With Pricing")
                             if selected_brands:
-                                filter_description.append(f"{len(selected_brands)} Brand(s)")
+                                mode_label = "Excl" if brand_mode == "Exclude" else "Incl"
+                                filter_description.append(f"{mode_label} {len(selected_brands)} Brand(s)")
                             if selected_locations:
-                                filter_description.append(f"{len(selected_locations)} Location(s)")
+                                mode_label = "Excl" if location_mode == "Exclude" else "Incl"
+                                filter_description.append(f"{mode_label} {len(selected_locations)} Location(s)")
                             if selected_templates:
-                                filter_description.append(f"{len(selected_templates)} Template(s)")
+                                mode_label = "Excl" if template_mode == "Exclude" else "Incl"
+                                filter_description.append(f"{mode_label} {len(selected_templates)} Template(s)")
                             if selected_categories:
-                                filter_description.append(f"{len(selected_categories)} Category(s)")
+                                mode_label = "Excl" if category_mode == "Exclude" else "Incl"
+                                filter_description.append(f"{mode_label} {len(selected_categories)} Category(s)")
                             
                             if filter_description:
                                 download_label = f"📥 Download Filtered Data ({', '.join(filter_description)})"
@@ -2050,8 +2153,12 @@ def main():
                             
                             # Create Blaze POS format - include Item for filtering
                             blaze_export = filtered_matches[['Product ID', 'Item']].copy()
-                            blaze_export['Retail Price'] = filtered_matches['Catalog_Retail_Price']
-                            blaze_export['Sale Price'] = filtered_matches['Catalog_Sale_Price']
+                            blaze_export['Retail Price'] = pd.to_numeric(filtered_matches['Catalog_Retail_Price'], errors='coerce')
+                            blaze_export['Sale Price'] = pd.to_numeric(filtered_matches['Catalog_Sale_Price'], errors='coerce')
+                            
+                            # Fill blank Sale Price with Retail Price (required for Blaze updater)
+                            # Convert to numeric first to avoid FutureWarning about downcasting
+                            blaze_export['Sale Price'] = blaze_export['Sale Price'].fillna(blaze_export['Retail Price'])
                             
                             # Apply exclusion filter
                             exclude_mask = pd.Series([False] * len(blaze_export))
@@ -2081,9 +2188,9 @@ def main():
                             # Rename to ProductId (no space)
                             blaze_export = blaze_export.rename(columns={'Product ID': 'ProductId'})
                             
-                            # Format prices to exactly 2 decimal places
-                            blaze_export['Retail Price'] = pd.to_numeric(blaze_export['Retail Price'], errors='coerce').round(2)
-                            blaze_export['Sale Price'] = pd.to_numeric(blaze_export['Sale Price'], errors='coerce').round(2)
+                            # Round prices to exactly 2 decimal places (already numeric from earlier conversion)
+                            blaze_export['Retail Price'] = blaze_export['Retail Price'].round(2)
+                            blaze_export['Sale Price'] = blaze_export['Sale Price'].round(2)
                             
                             # Create CSV with proper float formatting
                             blaze_csv = io.StringIO()
@@ -2203,7 +2310,7 @@ def main():
                 )
     
     else:
-        # Welcome screen (unchanged - truncated for length)
+        # Welcome screen
         st.info("👆 Upload your Products CSV in the sidebar to get started")
         
         st.subheader("📄 Data Processing Workflow")
@@ -2211,26 +2318,43 @@ def main():
         st.markdown(f"""
         **🎯 Product Price Checker v{VERSION} Features:**
         
-        1. **📋 Status Filter (NEW!)**
-           - ✅ Choose between "Active" (current) or "New Price" (11/14/2025) catalog prices
-           - ✅ See which price set is being used throughout the app
-           - ✅ Perfect for preparing price changes before they go live
+        1. **🔍 Smart Filtering (v4.2.8 NEW!)**
+           - ✅ Include/Exclude modes for all Price Inspector filters
+           - ✅ Exclude 1 brand instead of selecting 30+ brands to include
+           - ✅ Works for Brand, Location, Template, Category filters
+           - ✅ Makes large dataset filtering much more efficient
         
-        2. **📤 Blaze POS Export (NEW!)**
-           - ✅ 3-column format: Product ID, Retail Price, Sale Price
+        2. **💰 Sale Price Logic (v4.2.6 FIX!)**
+           - ✅ Matching sale prices now correctly show 0 difference
+           - ✅ Example: $5.99 = $5.99 shows 0, not -$5.99
+           - ✅ Handles semantic equivalence: blank catalog sale = company sale equals retail
+        
+        2. **💰 Sale Price Logic (v4.2.6 FIX!)**
+           - ✅ Matching sale prices now correctly show 0 difference
+           - ✅ Example: $5.99 = $5.99 shows 0, not -$5.99
+           - ✅ Handles semantic equivalence: blank catalog sale = company sale equals retail
+        
+        3. **📤 Blaze POS Export (v4.2.7 UPDATE!)**
+           - ✅ 3-column format: ProductId, Retail Price, Sale Price
+           - ✅ Blank Sale Price auto-filled with Retail Price
            - ✅ Ready for direct bulk upload to Blaze POS
-           - ✅ Uses catalog prices based on selected status
+           - ✅ Auto-excludes products without pricing
         
-        3. **📄 Automatic CSV Type Detection**
+        4. **📋 Multi-Status Filter**
+           - ✅ Choose multiple statuses: Active, New Price, New Product, etc.
+           - ✅ Default includes Active + New Price + New Product
+           - ✅ See which status is used for each product's pricing
+        
+        5. **📄 Automatic CSV Type Detection**
            - ✅ Auto-detects Company Export (multi-shop) or Shop Export (single-shop)
            - ✅ Company Export: Select specific shop or process all shops
            - ✅ Shop Export: Identify which shop the data is from
         
-        4. **🧠 Smart Matching & Processing**
+        6. **🧠 Smart Matching & Processing**
            - ✅ Filters out inactive products
            - ✅ Excludes unwanted categories
            - ✅ Cross-references with Product Catalog brands
-           - ✅ Advanced weight/keyword matching
+           - ✅ Advanced weight/keyword matching with wildcard support
            - ✅ Price comparison with catalog
         """)
 
