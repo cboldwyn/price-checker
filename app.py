@@ -1,9 +1,27 @@
 """
-Product Price Checker v4.2.9
+Product Price Checker v4.3.2
 Smart brand matching and price comparison tool for cannabis retail products
 Now with automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.3.2 (2025-11-14)
+- ENHANCEMENT: Added fallback to .5 Unit Price fields when standard fields are blank
+- Automatically uses ".5 Unit Price" when "Unit Price" is empty
+- Automatically uses ".5 Unit Sale Price" when "Unit Sale Price" is empty
+- Ensures pricing information is captured for all products
+
+v4.3.1 (2025-11-14)
+- ENHANCEMENT: Inventory filter now supports All/In Stock/Out of Stock
+- Can now filter to show ONLY out-of-stock products
+- Replaces simple "In Stock Only" checkbox with more flexible dropdown
+- Useful for identifying pricing issues on products with no inventory
+
+v4.3.0 (2025-11-14)
+- ENHANCEMENT: Added Price Difference Type filter in Price Inspector
+- Can now filter by: Any, Retail Only, Sale Only, or Both Retail and Sale differences
+- Makes it easy to focus on specific pricing issues (retail vs sale)
+- More granular control over price issue analysis
+
 v4.2.9 (2025-11-14)
 - BUGFIX: Fixed FutureWarning about downcasting in Blaze POS export
 - Convert to numeric before fillna to avoid pandas deprecation warning
@@ -104,13 +122,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Configure page
 st.set_page_config(
-    page_title="Product Price Checker v4.2.9",
+    page_title="Product Price Checker v4.3.2",
     page_icon="🛒",
     layout="wide"
 )
 
 # Configuration
-VERSION = "4.2.9"
+VERSION = "4.3.2"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -535,7 +553,8 @@ def filter_company_products(df, connect_catalog_df=None, selected_shop=None, csv
         'Cost per Unit', 'Unit Price', 'Unit Sale Price', 'Product ID',
         'Brand', 'Cannabis Type', 'Weight Per Unit', 'Custom Weight Measurement',
         'Custom Weight Type', 'Active', 'Available Online', 'Sell Type',
-        'Master Product ID', 'Company Product ID', 'Inventory Available'
+        'Master Product ID', 'Company Product ID', 'Inventory Available',
+        '.5 Unit Price', '.5 Unit Sale Price'  # Fallback price fields
     ]
     
     existing_columns = [col for col in columns_to_keep if col in active_df.columns]
@@ -546,6 +565,25 @@ def filter_company_products(df, connect_catalog_df=None, selected_shop=None, csv
     
     filtered_df = active_df[existing_columns].copy()
     st.write(f"**After column filtering**: {filtered_df.shape}")
+    
+    # Use .5 price fields as fallback when standard price fields are blank
+    if '.5 Unit Price' in filtered_df.columns and 'Unit Price' in filtered_df.columns:
+        # Fill blank Unit Price with .5 Unit Price
+        unit_price_blanks = filtered_df['Unit Price'].isna() | (filtered_df['Unit Price'] == '') | (filtered_df['Unit Price'] == '$0.00') | (filtered_df['Unit Price'] == '0.00') | (filtered_df['Unit Price'] == 0)
+        unit_price_fallback_count = (unit_price_blanks & filtered_df['.5 Unit Price'].notna()).sum()
+        
+        if unit_price_fallback_count > 0:
+            filtered_df.loc[unit_price_blanks, 'Unit Price'] = filtered_df.loc[unit_price_blanks, '.5 Unit Price']
+            st.info(f"💰 Used .5 Unit Price as fallback for {unit_price_fallback_count:,} products with blank Unit Price")
+    
+    if '.5 Unit Sale Price' in filtered_df.columns and 'Unit Sale Price' in filtered_df.columns:
+        # Fill blank Unit Sale Price with .5 Unit Sale Price
+        unit_sale_price_blanks = filtered_df['Unit Sale Price'].isna() | (filtered_df['Unit Sale Price'] == '') | (filtered_df['Unit Sale Price'] == '$0.00') | (filtered_df['Unit Sale Price'] == '0.00') | (filtered_df['Unit Sale Price'] == 0)
+        unit_sale_price_fallback_count = (unit_sale_price_blanks & filtered_df['.5 Unit Sale Price'].notna()).sum()
+        
+        if unit_sale_price_fallback_count > 0:
+            filtered_df.loc[unit_sale_price_blanks, 'Unit Sale Price'] = filtered_df.loc[unit_sale_price_blanks, '.5 Unit Sale Price']
+            st.info(f"💰 Used .5 Unit Sale Price as fallback for {unit_sale_price_fallback_count:,} products with blank Unit Sale Price")
     
     # Filter by valid brands from catalog
     if connect_catalog_df is not None and not connect_catalog_df.empty and 'Brand' in filtered_df.columns:
@@ -1582,7 +1620,25 @@ def main():
     # Add changelog expander
     with st.sidebar.expander("📋 Version History & Changelog"):
         st.markdown("""
-        **v4.2.9** (Current - 2025-11-14)
+        **v4.3.2** (Current - 2025-11-14)
+        - 💰 NEW: Fallback to .5 Unit Price fields
+        - ✅ Uses ".5 Unit Price" when "Unit Price" is blank
+        - ✅ Uses ".5 Unit Sale Price" when "Unit Sale Price" is blank
+        - 📊 Captures pricing for all products
+        
+        **v4.3.1** (2025-11-14)
+        - 🎯 NEW: Inventory filter (All/In Stock/Out of Stock)
+        - ✅ Can now show ONLY out-of-stock products
+        - 📦 Identify pricing issues on products with no inventory
+        - 🔧 Replaces simple checkbox with flexible dropdown
+        
+        **v4.3.0** (2025-11-14)
+        - 🎯 NEW: Price Difference Type filter
+        - ✅ Filter by: Any, Retail Only, Sale Only, Both
+        - 📊 Focus on specific pricing issues
+        - 🔍 More granular price analysis
+        
+        **v4.2.9** (2025-11-14)
         - 🐛 BUGFIX: Fixed FutureWarning in Blaze export
         - ✅ Eliminated pandas downcasting warning
         - 🧹 Code cleanup for production
@@ -1918,16 +1974,23 @@ def main():
                     # Filters - Row 1
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        show_price_issues_only = st.checkbox(
-                            "Show Only Price Issues (any difference)",
-                            value=False,
-                            help="Filter to only products with any retail or sale price differences"
+                        # Price difference type filter
+                        price_diff_type = st.selectbox(
+                            "Price Difference Filter:",
+                            options=["Show All", "Any Price Difference", "Retail Price Difference Only", 
+                                   "Sale Price Difference Only", "Both Retail and Sale Differences"],
+                            index=0,
+                            help="Filter by type of price difference"
                         )
-                        show_in_stock_only = st.checkbox(
-                            "Show Only In-stock Products",
-                            value=False,
-                            help="Filter to only products with Inventory Available > 0"
+                        
+                        # Inventory status filter
+                        inventory_filter = st.selectbox(
+                            "Inventory Status Filter:",
+                            options=["All Products", "In Stock Only", "Out of Stock Only"],
+                            index=0,
+                            help="Filter by inventory availability"
                         )
+                        
                         # ✅ NEW FILTER: Show only products with actual pricing
                         show_with_pricing_only = st.checkbox(
                             "Show Only Products With Pricing",
@@ -2011,21 +2074,41 @@ def main():
                     # Apply filters
                     filtered_matches = matched_data.copy()
                     
-                    if show_price_issues_only:
+                    # Apply price difference type filter
+                    if price_diff_type != "Show All":
                         if 'Retail_Price_Diff' in filtered_matches.columns:
                             retail_diff_numeric = pd.to_numeric(filtered_matches['Retail_Price_Diff'], errors='coerce').fillna(0)
                             sale_diff_numeric = pd.to_numeric(filtered_matches['Sale_Price_Diff'], errors='coerce').fillna(0) if 'Sale_Price_Diff' in filtered_matches.columns else pd.Series([0] * len(filtered_matches))
                             
-                            retail_issues = retail_diff_numeric != 0
-                            sale_issues = sale_diff_numeric != 0
-                            price_issue_mask = retail_issues | sale_issues
-                            filtered_matches = filtered_matches[price_issue_mask]
+                            has_retail_diff = retail_diff_numeric.abs() > 0.01
+                            has_sale_diff = sale_diff_numeric.abs() > 0.01
+                            
+                            if price_diff_type == "Any Price Difference":
+                                # Show products with ANY price difference
+                                price_mask = has_retail_diff | has_sale_diff
+                            elif price_diff_type == "Retail Price Difference Only":
+                                # Show products with ONLY retail price difference (no sale price difference)
+                                price_mask = has_retail_diff & ~has_sale_diff
+                            elif price_diff_type == "Sale Price Difference Only":
+                                # Show products with ONLY sale price difference (no retail price difference)
+                                price_mask = ~has_retail_diff & has_sale_diff
+                            elif price_diff_type == "Both Retail and Sale Differences":
+                                # Show products with BOTH retail AND sale price differences
+                                price_mask = has_retail_diff & has_sale_diff
+                            
+                            filtered_matches = filtered_matches[price_mask]
                     
-                    if show_in_stock_only:
+                    # Apply inventory status filter
+                    if inventory_filter != "All Products":
                         if 'Inventory Available' in filtered_matches.columns:
                             inventory_numeric = pd.to_numeric(filtered_matches['Inventory Available'], errors='coerce').fillna(0)
-                            in_stock_mask = inventory_numeric > 0
-                            filtered_matches = filtered_matches[in_stock_mask]
+                            
+                            if inventory_filter == "In Stock Only":
+                                in_stock_mask = inventory_numeric > 0
+                                filtered_matches = filtered_matches[in_stock_mask]
+                            elif inventory_filter == "Out of Stock Only":
+                                out_of_stock_mask = inventory_numeric <= 0
+                                filtered_matches = filtered_matches[out_of_stock_mask]
                     
                     # ✅ NEW: Filter to only products with actual pricing
                     if show_with_pricing_only:
@@ -2104,10 +2187,20 @@ def main():
                             display_df.to_csv(csv_buffer, index=False)
                             
                             filter_description = []
-                            if show_price_issues_only:
-                                filter_description.append("Price Issues")
-                            if show_in_stock_only:
-                                filter_description.append("In-Stock")
+                            if price_diff_type != "Show All":
+                                if price_diff_type == "Any Price Difference":
+                                    filter_description.append("Any Price Diff")
+                                elif price_diff_type == "Retail Price Difference Only":
+                                    filter_description.append("Retail Diff Only")
+                                elif price_diff_type == "Sale Price Difference Only":
+                                    filter_description.append("Sale Diff Only")
+                                elif price_diff_type == "Both Retail and Sale Differences":
+                                    filter_description.append("Both Diffs")
+                            if inventory_filter != "All Products":
+                                if inventory_filter == "In Stock Only":
+                                    filter_description.append("In-Stock")
+                                elif inventory_filter == "Out of Stock Only":
+                                    filter_description.append("Out-of-Stock")
                             if show_with_pricing_only:
                                 filter_description.append("With Pricing")
                             if selected_brands:
@@ -2318,39 +2411,50 @@ def main():
         st.markdown(f"""
         **🎯 Product Price Checker v{VERSION} Features:**
         
-        1. **🔍 Smart Filtering (v4.2.8 NEW!)**
-           - ✅ Include/Exclude modes for all Price Inspector filters
-           - ✅ Exclude 1 brand instead of selecting 30+ brands to include
-           - ✅ Works for Brand, Location, Template, Category filters
-           - ✅ Makes large dataset filtering much more efficient
+        1. **💰 Smart Price Extraction (v4.3.2 NEW!)**
+           - ✅ Automatic fallback to .5 Unit Price fields when standard fields are blank
+           - ✅ Ensures all product pricing is captured
+           - ✅ Handles edge cases in Company Products data
+        
+        2. **🔍 Smart Filtering**
+           - ✅ Price Difference Type: Any, Retail Only, Sale Only, Both
+           - ✅ Inventory Status: All, In Stock Only, Out of Stock Only
+           - ✅ Include/Exclude modes for Brand/Location/Template/Category
+           - ✅ Focus on specific pricing issues and inventory status
         
         2. **💰 Sale Price Logic (v4.2.6 FIX!)**
            - ✅ Matching sale prices now correctly show 0 difference
            - ✅ Example: $5.99 = $5.99 shows 0, not -$5.99
            - ✅ Handles semantic equivalence: blank catalog sale = company sale equals retail
         
-        2. **💰 Sale Price Logic (v4.2.6 FIX!)**
+        2. **🔍 Smart Filtering**
+           - ✅ Price Difference Type: Any, Retail Only, Sale Only, Both
+           - ✅ Inventory Status: All, In Stock Only, Out of Stock Only
+           - ✅ Include/Exclude modes for Brand/Location/Template/Category
+           - ✅ Focus on specific pricing issues and inventory status
+        
+        3. **💰 Sale Price Logic (v4.2.6 FIX!)**
            - ✅ Matching sale prices now correctly show 0 difference
            - ✅ Example: $5.99 = $5.99 shows 0, not -$5.99
            - ✅ Handles semantic equivalence: blank catalog sale = company sale equals retail
         
-        3. **📤 Blaze POS Export (v4.2.7 UPDATE!)**
+        4. **📤 Blaze POS Export (v4.2.7 UPDATE!)**
            - ✅ 3-column format: ProductId, Retail Price, Sale Price
            - ✅ Blank Sale Price auto-filled with Retail Price
            - ✅ Ready for direct bulk upload to Blaze POS
            - ✅ Auto-excludes products without pricing
         
-        4. **📋 Multi-Status Filter**
+        5. **📋 Multi-Status Filter**
            - ✅ Choose multiple statuses: Active, New Price, New Product, etc.
            - ✅ Default includes Active + New Price + New Product
            - ✅ See which status is used for each product's pricing
         
-        5. **📄 Automatic CSV Type Detection**
+        6. **📄 Automatic CSV Type Detection**
            - ✅ Auto-detects Company Export (multi-shop) or Shop Export (single-shop)
            - ✅ Company Export: Select specific shop or process all shops
            - ✅ Shop Export: Identify which shop the data is from
         
-        6. **🧠 Smart Matching & Processing**
+        7. **🧠 Smart Matching & Processing**
            - ✅ Filters out inactive products
            - ✅ Excludes unwanted categories
            - ✅ Cross-references with Product Catalog brands
