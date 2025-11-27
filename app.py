@@ -1,14 +1,27 @@
 """
-Product Price Checker v4.3.5
+Product Price Checker v4.3.10
 Smart brand matching and price comparison tool for cannabis retail products
 With automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
-v4.3.5 (2025-11-21)
-- CRITICAL FIX: Enhanced Stiiizy STRAIN pattern matching
-- Now properly matches "Stiiizy - Black Bag Black Cherry 3.5g" to "Stiiizy - STRAIN Black Bag 3.5g"
-- Handles patterns where STRAIN placeholder comes before bag type in template
-- Fixed wildcard matching for complex brand-specific patterns
+v4.3.10 (2025-11-27)
+- CRITICAL FIX: Unit Price now displays correctly in Streamlit dataframe
+- Issue: Data exists (exports correctly) but shows as "None" in UI
+- Solution: Convert price columns to strings before display
+- This is a Streamlit rendering issue, not a data issue
+- All price columns now display properly
+
+v4.3.9 (2025-11-27)
+- CRITICAL FIX: Unit Price columns now created if missing from source data
+- Properly handles shop exports where Unit Price columns don't exist
+- Fallback now works even when main price columns are completely missing
+- Removed duplicate fallback logic that was running after columns were deleted
+
+v4.3.7 (2025-11-27)
+- CRITICAL FIX: Unit Price and Unit Sale Price columns now display correctly
+- Fixed mixed price format issue ('49.98' vs '$49.98') causing display problems
+- All prices now normalized to consistent $XX.XX format
+- Enhanced Stiiizy STRAIN pattern matching from v4.3.5
 
 v4.3.4 (2025-11-21)
 - ENHANCEMENT: Added Hawthorne store mapping ('HAVEN - Hawthorne South Bay' → 'Hawthorne')
@@ -72,13 +85,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Page configuration
 st.set_page_config(
-    page_title="Product Price Checker v4.3.5",
+    page_title="Product Price Checker v4.3.10",
     page_icon="🛒",
     layout="wide"
 )
 
 # Version and URLs
-VERSION = "4.3.5"
+VERSION = "4.3.10"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -352,7 +365,7 @@ def match_placeholder_pattern(product_name, template_name):
     
     Handles placeholders like:
     - STRAIN (any strain name)
-    - COLOR (any color)
+    - COLOR (any color) 
     - FLAVOR (any flavor)
     - SIZE (any size)
     
@@ -381,7 +394,7 @@ def match_placeholder_pattern(product_name, template_name):
     product_upper = str(product_name).upper()
     template_upper = str(template_name).upper()
     
-    # SPECIAL HANDLING FOR STIIIZY STRAIN PATTERNS
+    # SPECIAL HANDLING FOR STIIIZY STRAIN PATTERNS (v4.3.7)
     # Template: "Stiiizy - STRAIN Black Bag 3.5g" 
     # Product:  "Stiiizy - Black Bag Black Cherry 3.5g"
     if 'STIIIZY' in product_upper and 'STIIIZY' in template_upper and 'STRAIN' in template_upper:
@@ -411,21 +424,6 @@ def match_placeholder_pattern(product_name, template_name):
                             if bag_type in product_after_brand:
                                 # This is a match!
                                 return True
-                
-                # Alternative pattern: Template might be "STIIIZY - [BAG_TYPE] STRAIN [WEIGHT]"
-                # This would match: "STIIIZY - [BAG_TYPE] [STRAIN_NAME] [WEIGHT]"
-                if bag_type + ' STRAIN' in template_after_brand:
-                    # This means STRAIN comes after bag type
-                    # Extract everything after the bag type
-                    product_after_bag = product_after_brand.split(bag_type)[-1].strip()
-                    template_after_bag = template_after_brand.split(bag_type)[-1].strip()
-                    
-                    # Template should have "STRAIN [weight]"
-                    if template_after_bag.startswith('STRAIN'):
-                        template_weight_part = template_after_bag.replace('STRAIN', '').strip()
-                        # Check if weights match
-                        if template_weight_part in product_after_bag:
-                            return True
     
     # STANDARD PLACEHOLDER MATCHING (for non-Stiiizy or other patterns)
     for placeholder in placeholders:
@@ -677,22 +675,80 @@ def filter_company_products(df, connect_catalog_df=None, selected_shop=None, csv
     filtered_df = active_df[existing_columns].copy()
     st.write(f"**After column filtering**: {filtered_df.shape}")
     
-    # Use .5 price fields as fallback when standard price fields are blank
-    if '.5 Unit Price' in filtered_df.columns and 'Unit Price' in filtered_df.columns:
-        unit_price_blanks = filtered_df['Unit Price'].isna() | (filtered_df['Unit Price'] == '') | (filtered_df['Unit Price'] == '$0.00') | (filtered_df['Unit Price'] == '0.00') | (filtered_df['Unit Price'] == 0)
-        unit_price_fallback_count = (unit_price_blanks & filtered_df['.5 Unit Price'].notna()).sum()
-        
-        if unit_price_fallback_count > 0:
-            filtered_df.loc[unit_price_blanks, 'Unit Price'] = filtered_df.loc[unit_price_blanks, '.5 Unit Price']
-            st.info(f"💰 Used .5 Unit Price as fallback for {unit_price_fallback_count:,} products with blank Unit Price")
+    # Create Unit Price columns if they don't exist (v4.3.9 fix)
+    # This ensures we have columns to copy the fallback values into
+    if 'Unit Price' not in filtered_df.columns:
+        filtered_df['Unit Price'] = None
+        st.info("📝 Created Unit Price column for fallback values")
     
-    if '.5 Unit Sale Price' in filtered_df.columns and 'Unit Sale Price' in filtered_df.columns:
-        unit_sale_price_blanks = filtered_df['Unit Sale Price'].isna() | (filtered_df['Unit Sale Price'] == '') | (filtered_df['Unit Sale Price'] == '$0.00') | (filtered_df['Unit Sale Price'] == '0.00') | (filtered_df['Unit Sale Price'] == 0)
-        unit_sale_price_fallback_count = (unit_sale_price_blanks & filtered_df['.5 Unit Sale Price'].notna()).sum()
+    if 'Unit Sale Price' not in filtered_df.columns:
+        filtered_df['Unit Sale Price'] = None  
+        st.info("📝 Created Unit Sale Price column for fallback values")
+    
+    # Use .5 price fields as fallback when standard price fields are blank (v4.3.9)
+    if '.5 Unit Price' in filtered_df.columns:
+        # Check where Unit Price is None/NaN or empty
+        unit_price_is_empty = (
+            filtered_df['Unit Price'].isna() | 
+            (filtered_df['Unit Price'] == None) |
+            (filtered_df['Unit Price'] == 'None') |
+            (filtered_df['Unit Price'] == '')
+        )
         
-        if unit_sale_price_fallback_count > 0:
-            filtered_df.loc[unit_sale_price_blanks, 'Unit Sale Price'] = filtered_df.loc[unit_sale_price_blanks, '.5 Unit Sale Price']
-            st.info(f"💰 Used .5 Unit Sale Price as fallback for {unit_sale_price_fallback_count:,} products with blank Unit Sale Price")
+        # Copy .5 Unit Price values to Unit Price where Unit Price is empty
+        fallback_count = (unit_price_is_empty & filtered_df['.5 Unit Price'].notna()).sum()
+        if fallback_count > 0:
+            filtered_df.loc[unit_price_is_empty, 'Unit Price'] = filtered_df.loc[unit_price_is_empty, '.5 Unit Price']
+            st.success(f"✅ Applied .5 Unit Price values to {fallback_count:,} products")
+    
+    if '.5 Unit Sale Price' in filtered_df.columns:
+        # Check where Unit Sale Price is None/NaN or empty  
+        sale_price_is_empty = (
+            filtered_df['Unit Sale Price'].isna() | 
+            (filtered_df['Unit Sale Price'] == None) |
+            (filtered_df['Unit Sale Price'] == 'None') |
+            (filtered_df['Unit Sale Price'] == '')
+        )
+        
+        # Copy .5 Unit Sale Price values to Unit Sale Price where Unit Sale Price is empty
+        fallback_count = (sale_price_is_empty & filtered_df['.5 Unit Sale Price'].notna()).sum()
+        if fallback_count > 0:
+            filtered_df.loc[sale_price_is_empty, 'Unit Sale Price'] = filtered_df.loc[sale_price_is_empty, '.5 Unit Sale Price']
+            st.success(f"✅ Applied .5 Unit Sale Price values to {fallback_count:,} products")
+    
+    # NOW normalize price columns to ensure consistent display
+    # Fixes issue where mixed formats like '49.98' and '$49.98' caused display problems
+    price_columns = ['Unit Price', 'Unit Sale Price', 'Cost per Unit']
+    
+    for col in price_columns:
+        if col in filtered_df.columns:
+            # Convert each value to consistent $XX.XX format
+            def normalize_price(x):
+                if pd.isna(x) or str(x).strip() in ['', 'nan', 'None', 'NaN']:
+                    return None
+                # Remove $ and convert to string
+                price_str = str(x).replace('$', '').replace(',', '').strip()
+                try:
+                    # Try to convert to float to validate it's a number
+                    price_float = float(price_str)
+                    # Return formatted with $ 
+                    return f"${price_float:.2f}"
+                except:
+                    # If not a valid number, return original
+                    return x
+            
+            filtered_df[col] = filtered_df[col].apply(normalize_price)
+    
+    # Remove the .5 price columns after using them - they're not needed for display
+    columns_to_remove = []
+    if '.5 Unit Price' in filtered_df.columns:
+        columns_to_remove.append('.5 Unit Price')
+    if '.5 Unit Sale Price' in filtered_df.columns:
+        columns_to_remove.append('.5 Unit Sale Price')
+    
+    if columns_to_remove:
+        filtered_df = filtered_df.drop(columns=columns_to_remove)
+        st.info(f"🧹 Removed .5 price columns from display")
     
     # Filter by valid brands from catalog
     if connect_catalog_df is not None and not connect_catalog_df.empty and 'Brand' in filtered_df.columns:
@@ -1955,7 +2011,23 @@ def main():
                         st.metric("💰 Price Issues", f"{price_issues:,}")
                 
                 # Data table
-                st.dataframe(df_csv, use_container_width=True)
+                # v4.3.10 Fix: Prepare price columns for Streamlit display
+                # The data exists (confirmed in export) but Streamlit shows "None"
+                # This fixes the Streamlit rendering issue
+                display_df = df_csv.copy()
+                
+                # Ensure price columns display properly
+                price_columns = ['Unit Price', 'Unit Sale Price', 'Cost per Unit']
+                for col in price_columns:
+                    if col in display_df.columns:
+                        # First ensure all values are strings (handles None, NaN, etc)
+                        display_df[col] = display_df[col].fillna('')
+                        # Convert to string explicitly to force display
+                        display_df[col] = display_df[col].astype(str)
+                        # Replace 'nan' string with empty
+                        display_df[col] = display_df[col].replace('nan', '')
+                
+                st.dataframe(display_df, use_container_width=True)
                 
                 # Download button
                 csv_buffer = io.StringIO()
