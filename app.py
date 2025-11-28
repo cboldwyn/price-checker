@@ -1,9 +1,15 @@
 """
-Product Price Checker v4.3.10
+Product Price Checker v4.3.13
 Smart brand matching and price comparison tool for cannabis retail products
 With automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.3.13 (2025-11-27)
+- RESTORED: Full application code (v4.3.11-12 were accidentally truncated)
+- FIXED: Unit Price display by converting '$34.98' strings to numeric
+- FIXED: Blaze POS headers exactly: ProductId,Retail Price,Sale Price
+- All features from v4.3.10 preserved and working
+
 v4.3.10 (2025-11-27)
 - CRITICAL FIX: Unit Price now displays correctly in Streamlit dataframe
 - Issue: Data exists (exports correctly) but shows as "None" in UI
@@ -73,6 +79,7 @@ Previous versions consolidated - see git history for details
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import io
 import re
 from google.oauth2.service_account import Credentials
@@ -85,13 +92,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Page configuration
 st.set_page_config(
-    page_title="Product Price Checker v4.3.10",
+    page_title="Product Price Checker v4.3.13",
     page_icon="🛒",
     layout="wide"
 )
 
 # Version and URLs
-VERSION = "4.3.10"
+VERSION = "4.3.13"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -2011,21 +2018,26 @@ def main():
                         st.metric("💰 Price Issues", f"{price_issues:,}")
                 
                 # Data table
-                # v4.3.10 Fix: Prepare price columns for Streamlit display
-                # The data exists (confirmed in export) but Streamlit shows "None"
-                # This fixes the Streamlit rendering issue
+                # v4.3.13 Fix: Convert price strings with $ to numeric for proper display
+                # The data has '$34.98' strings, Streamlit needs numeric 34.98
                 display_df = df_csv.copy()
                 
-                # Ensure price columns display properly
+                # Convert price columns from '$34.98' strings to 34.98 numeric
                 price_columns = ['Unit Price', 'Unit Sale Price', 'Cost per Unit']
                 for col in price_columns:
                     if col in display_df.columns:
-                        # First ensure all values are strings (handles None, NaN, etc)
-                        display_df[col] = display_df[col].fillna('')
-                        # Convert to string explicitly to force display
-                        display_df[col] = display_df[col].astype(str)
-                        # Replace 'nan' string with empty
-                        display_df[col] = display_df[col].replace('nan', '')
+                        # Convert string prices to numeric
+                        def clean_price_for_display(x):
+                            if pd.isna(x) or str(x).strip() in ['', 'None', 'nan']:
+                                return np.nan
+                            try:
+                                # Remove $ and commas, convert to float
+                                cleaned = str(x).replace('$', '').replace(',', '').strip()
+                                return float(cleaned)
+                            except:
+                                return np.nan
+                        
+                        display_df[col] = display_df[col].apply(clean_price_for_display)
                 
                 st.dataframe(display_df, use_container_width=True)
                 
@@ -2294,9 +2306,9 @@ def main():
                                 if len(blaze_df) > 0:
                                     # Create Blaze format (3 columns)
                                     blaze_export = pd.DataFrame({
-                                        'Product ID': blaze_df['Product ID'],
-                                        'Unit Price': blaze_df['Catalog_Retail_Price'].fillna(0).round(2),
-                                        'Unit Sale Price': blaze_df.apply(
+                                        'ProductId': blaze_df['Product ID'],
+                                        'Retail Price': blaze_df['Catalog_Retail_Price'].fillna(0).round(2),
+                                        'Sale Price': blaze_df.apply(
                                             lambda row: row['Catalog_Sale_Price'] if pd.notna(row['Catalog_Sale_Price']) 
                                             else row['Catalog_Retail_Price'], axis=1
                                         ).fillna(0).round(2)
