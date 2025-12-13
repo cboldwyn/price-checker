@@ -1,9 +1,19 @@
 """
-Product Price Checker v4.3.15
+Product Price Checker v4.3.17
 Smart brand matching and price comparison tool for cannabis retail products
 With automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.3.17 (2025-12-13)
+- ADDED: Apparel matching logic with size handling
+- Strips size in parentheses (e.g., "(XS)") for matching
+- Matches "California Shirt (XS)" to "California Shirt" template
+
+v4.3.16 (2025-12-13)
+- CHANGED: Apparel category now INCLUDED in processing
+- Previously excluded, now processes apparel products
+- All other excluded categories remain filtered
+
 v4.3.15 (2025-12-09)
 - IMPROVED: Price Difference Type filter now uses multi-select
 - Users can select any combination of Retail, Sale, and Cost differences
@@ -104,13 +114,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Page configuration
 st.set_page_config(
-    page_title="Product Price Checker v4.3.13",
+    page_title="Product Price Checker v4.3.17",
     page_icon="🛒",
     layout="wide"
 )
 
 # Version and URLs
-VERSION = "4.3.15"
+VERSION = "4.3.17"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -139,7 +149,7 @@ EXACT_PRODUCT_MATCH_BRANDS = {
 
 # Categories to exclude from processing
 EXCLUDED_CATEGORIES = [
-    'Display', 'Clones', 'Apparel', 'Sample', 'Promo', 'Compassion', 
+    'Display', 'Clones', 'Sample', 'Promo', 'Compassion', 
     'Donation', 'Boxes', 'Non-Cannabis', 'Gift Cards', 'xxxDONOTUSE-Buzzers'
 ]
 
@@ -1001,6 +1011,7 @@ def add_smart_brand_matching(company_df, catalog_df):
     flower_weight_matches = 0
     preroll_matches = 0
     vape_extract_matches = 0
+    apparel_matches = 0
     no_matches = 0
     
     progress_bar = st.progress(0)
@@ -1203,7 +1214,7 @@ def add_smart_brand_matching(company_df, catalog_df):
                 })
         
         # 6. Try advanced weight/keyword matching for complex categories
-        if not match_found and category in ['Flower', 'Preroll', 'Vape', 'Extract'] and brand in multiple_entry_brands:
+        if not match_found and category in ['Flower', 'Preroll', 'Vape', 'Extract', 'Apparel'] and brand in multiple_entry_brands:
             brand_category_key = f"{brand}|{category}"
             if brand_category_key in multiple_entry_brand_categories:
                 templates = multiple_entry_brand_categories[brand_category_key]
@@ -1218,6 +1229,8 @@ def add_smart_brand_matching(company_df, catalog_df):
                     matched_template, match_steps = match_preroll_products(row, templates)
                 elif category in ['Vape', 'Extract']:
                     matched_template, match_steps = match_vape_extract_products(row, templates, category)
+                elif category == 'Apparel':
+                    matched_template, match_steps = match_apparel_products(row, templates)
                 
                 if matched_template:
                     matched_df.at[idx, 'Catalog_Match_Found'] = True
@@ -1230,6 +1243,8 @@ def add_smart_brand_matching(company_df, catalog_df):
                         flower_weight_matches += 1
                     elif category == 'Preroll':
                         preroll_matches += 1
+                    elif category == 'Apparel':
+                        apparel_matches += 1
                     else:
                         vape_extract_matches += 1
                     
@@ -1250,7 +1265,7 @@ def add_smart_brand_matching(company_df, catalog_df):
     progress_bar.progress(1.0)
     
     # Show results
-    total_matches = exact_matches + wildcard_matches + single_entry_matches + brand_category_matches + flower_weight_matches + preroll_matches + vape_extract_matches
+    total_matches = exact_matches + wildcard_matches + single_entry_matches + brand_category_matches + flower_weight_matches + preroll_matches + vape_extract_matches + apparel_matches
     total_match_rate = (total_matches / len(matched_df)) * 100 if len(matched_df) > 0 else 0
     
     st.success(f"🎉 Enhanced Matching Results:")
@@ -1259,7 +1274,7 @@ def add_smart_brand_matching(company_df, catalog_df):
     placeholder_pattern_count = matched_df[matched_df['Match_Type'] == 'placeholder_pattern'].shape[0]
     exact_only_count = exact_matches - placeholder_pattern_count
     
-    col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
+    col1, col2, col3, col4, col5, col6, col7, col8, col9 = st.columns(9)
     with col1:
         st.metric("🎯 Exact", f"{exact_only_count:,}")
     with col2:
@@ -1275,6 +1290,8 @@ def add_smart_brand_matching(company_df, catalog_df):
     with col7:
         st.metric("💨 Vape/Ext", f"{vape_extract_matches:,}")
     with col8:
+        st.metric("👕 Apparel", f"{apparel_matches:,}")
+    with col9:
         st.metric("📊 Total", f"{total_matches:,} ({total_match_rate:.1f}%)")
     
     # Store troubleshooting data in session state
@@ -1498,6 +1515,56 @@ def match_vape_extract_products(row, templates, category):
             match_steps.append("no keywords (fallback)")
     
     return (current_templates[0], match_steps) if len(current_templates) == 1 else (None, [])
+
+def match_apparel_products(row, templates):
+    """
+    Advanced matching for apparel products by stripping size suffixes
+    
+    Apparel products in Company Products have sizes in parentheses:
+    - "Haven - California Shirt (XS)" → matches "Haven - California Shirt"
+    - "Haven - Hoodie (Large)" → matches "Haven - Hoodie"
+    
+    Args:
+        row: Product row from company data
+        templates: List of possible catalog templates for this brand
+    
+    Returns:
+        tuple: (matched_template, match_steps) or (None, [])
+    """
+    company_item = row['Item']
+    match_steps = []
+    
+    # Strip size from company item (anything in parentheses at the end)
+    import re
+    size_pattern = r'\s*\([^)]+\)\s*$'
+    company_item_no_size = re.sub(size_pattern, '', str(company_item)).strip()
+    
+    # Check if we removed a size
+    if company_item_no_size != str(company_item).strip():
+        size_match = re.search(r'\(([^)]+)\)$', str(company_item))
+        if size_match:
+            extracted_size = size_match.group(1)
+            match_steps.append(f"size: {extracted_size}")
+    
+    # Now try to match the size-stripped item against templates
+    matched_template = None
+    for template in templates:
+        # Clean comparison - case insensitive
+        if company_item_no_size.lower() == str(template).lower():
+            matched_template = template
+            match_steps.append("exact match (without size)")
+            break
+    
+    # If no exact match, try partial matching for complex apparel names
+    if not matched_template and len(templates) == 1:
+        # If only one template for this brand/category, more lenient matching
+        template = templates[0]
+        # Check if the core product name is in both
+        if company_item_no_size.lower() in str(template).lower() or str(template).lower() in company_item_no_size.lower():
+            matched_template = template
+            match_steps.append("partial match (single template)")
+    
+    return (matched_template, match_steps) if matched_template else (None, [])
 
 # ============================================================================
 # PRICE COMPARISON FUNCTIONS
@@ -1817,7 +1884,18 @@ def main():
     # Add changelog expander
     with st.sidebar.expander("📋 Version History & Changelog"):
         st.markdown("""
-        **v4.3.15** (Current - 2025-12-09)
+        **v4.3.17** (Current - 2025-12-13)
+        - 👕 ADDED: Apparel matching logic with size handling
+        - ✂️ Strips size in parentheses for matching
+        - 🎯 Matches "California Shirt (XS)" to "California Shirt"
+        - 📊 Added apparel counter to results display
+        
+        **v4.3.16** (2025-12-13)
+        - 👕 CHANGED: Apparel category now INCLUDED
+        - ✅ Previously excluded, now processes apparel products
+        - 📋 All other excluded categories remain filtered
+        
+        **v4.3.15** (2025-12-09)
         - 🎯 IMPROVED: Multi-select filter for price differences
         - 📊 Choose any combination of Retail, Sale, Cost
         - ✅ Defaults to Retail + Sale (most common)
