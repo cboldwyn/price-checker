@@ -1,9 +1,21 @@
 """
-Product Price Checker v4.3.13
+Product Price Checker v4.3.15
 Smart brand matching and price comparison tool for cannabis retail products
 With automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.3.15 (2025-12-09)
+- IMPROVED: Price Difference Type filter now uses multi-select
+- Users can select any combination of Retail, Sale, and Cost differences
+- Defaults to Retail + Sale (most common use case)
+- More flexible filtering for typical workflows
+
+v4.3.14 (2025-12-09)
+- FIXED: Price Inspector now properly displays Unit Price and Unit Sale Price
+- ADDED: Cost per Unit tracking from Company Products  
+- ADDED: Max Unit Cost comparison from Product Catalog
+- Enhanced price string to numeric conversion for all display tables
+
 v4.3.13 (2025-11-27)
 - RESTORED: Full application code (v4.3.11-12 were accidentally truncated)
 - FIXED: Unit Price display by converting '$34.98' strings to numeric
@@ -98,7 +110,7 @@ st.set_page_config(
 )
 
 # Version and URLs
-VERSION = "4.3.13"
+VERSION = "4.3.15"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -187,6 +199,25 @@ def clean_price(price_str):
         return float(cleaned)
     except:
         return None
+
+def clean_price_for_display(x):
+    """
+    Convert price strings with $ to numeric for Streamlit display
+    
+    Args:
+        x: Price value (could be '$34.98', 34.98, None, etc.)
+        
+    Returns:
+        float or np.nan: Numeric price value for display
+    """
+    if pd.isna(x) or str(x).strip() in ['', 'None', 'nan', 'NaN']:
+        return np.nan
+    try:
+        # Remove $ and commas, convert to float
+        cleaned = str(x).replace('$', '').replace(',', '').strip()
+        return float(cleaned)
+    except:
+        return np.nan
 
 def extract_gid_from_url(sheet_url):
     """
@@ -1475,7 +1506,7 @@ def match_vape_extract_products(row, templates, category):
 def add_simple_price_comparison(company_df, catalog_df, selected_statuses=['Active']):
     """
     Simple price comparison - add basic price difference columns
-    Only uses prices from catalog products with the selected statuses
+    Now includes Cost per Unit comparison with Max Unit Cost from catalog
     
     Args:
         company_df: Products dataframe
@@ -1510,6 +1541,10 @@ def add_simple_price_comparison(company_df, catalog_df, selected_statuses=['Acti
     company_df['Sale_Price_Diff'] = None
     company_df['Catalog_Status_Used'] = None
     
+    # NEW: Add cost comparison columns
+    company_df['Catalog_Max_Unit_Cost'] = None
+    company_df['Cost_Diff'] = None
+    
     # Build catalog lookup - filter by selected statuses
     catalog_for_pricing = catalog_df[catalog_df['Status'].isin(selected_statuses)].copy() if 'Status' in catalog_df.columns else catalog_df
     
@@ -1525,6 +1560,7 @@ def add_simple_price_comparison(company_df, catalog_df, selected_statuses=['Acti
             }
     
     pricing_issues = 0
+    cost_issues = 0
     matched_but_no_pricing = 0
     
     # Compare prices for each matched product
@@ -1560,6 +1596,21 @@ def add_simple_price_comparison(company_df, catalog_df, selected_statuses=['Acti
         # Store catalog prices
         company_df.at[idx, 'Catalog_Retail_Price'] = catalog_retail
         company_df.at[idx, 'Catalog_Sale_Price'] = catalog_sale
+        
+        # NEW: Get and compare costs
+        catalog_max_cost = clean_price(catalog_data.get('Max Unit Cost'))
+        company_cost = clean_price(row.get('Cost per Unit'))
+        
+        if catalog_max_cost is not None:
+            company_df.at[idx, 'Catalog_Max_Unit_Cost'] = catalog_max_cost
+            
+            if company_cost is not None:
+                cost_diff = company_cost - catalog_max_cost
+                company_df.at[idx, 'Cost_Diff'] = cost_diff
+                
+                # Track if cost exceeds max
+                if cost_diff > 0.01:
+                    cost_issues += 1
         
         # Calculate differences - IMPROVED LOGIC
         # Retail Price Comparison
@@ -1605,6 +1656,9 @@ def add_simple_price_comparison(company_df, catalog_df, selected_statuses=['Acti
         st.warning(f"⚠️ {matched_but_no_pricing} matched products don't have any of the selected statuses ({status_list})")
     
     st.success(f"💰 Price comparison complete! Found {pricing_issues:,} products with price differences > $0.01")
+    
+    if cost_issues > 0:
+        st.warning(f"⚠️ Found {cost_issues:,} products where Cost per Unit exceeds Max Unit Cost")
     
     return company_df
 
@@ -1763,42 +1817,26 @@ def main():
     # Add changelog expander
     with st.sidebar.expander("📋 Version History & Changelog"):
         st.markdown("""
-        **v4.3.4** (Current - 2025-11-21)
+        **v4.3.15** (Current - 2025-12-09)
+        - 🎯 IMPROVED: Multi-select filter for price differences
+        - 📊 Choose any combination of Retail, Sale, Cost
+        - ✅ Defaults to Retail + Sale (most common)
+        - 🔧 More flexible filtering workflow
+        
+        **v4.3.14** (2025-12-09)
+        - 🔧 FIXED: Price Inspector displays Unit Price correctly
+        - 💰 ADDED: Cost per Unit tracking
+        - 📊 ADDED: Max Unit Cost comparison
+        - 🎯 Enhanced price string conversion
+        
+        **v4.3.13** (2025-11-27)
+        - ✅ Full application restored after truncation
+        - 💰 Fixed Unit Price display in main Products tab
+        - 🔥 Fixed Blaze POS headers format
+        
+        **v4.3.4** (2025-11-21)
         - 🏪 Added Hawthorne store mapping
-        - 🔧 Fixed missing tabs (Price Inspector, Troubleshooting, Catalog)
-        - 🐛 Fixed Price Inspector formatting error (ValueError with style.format)
         - 📍 Now supports 12 store locations
-        
-        **v4.3.3** (2025-11-19)
-        - 🧹 CODE: Major cleanup and reorganization
-        - 📝 Consolidated changelog, removed duplicates
-        - 📂 Improved section organization
-        - ✅ No functional changes - all matching preserved
-        
-        **v4.3.2** (2025-11-14)
-        - 💰 Added fallback to .5 Unit Price fields
-        - ✅ Captures all product pricing
-        
-        **v4.3.1** (2025-11-14)
-        - 🎯 Inventory filter (All/In Stock/Out of Stock)
-        
-        **v4.3.0** (2025-11-14)
-        - 🎯 Price Difference Type filter
-        
-        **v4.2.8** (2025-11-14)
-        - 🔍 Include/Exclude modes for filters
-        
-        **v4.2.7** (2025-11-14)
-        - 📄 Blaze POS: fills blank Sale with Retail
-        
-        **v4.2.6** (2025-11-14)
-        - 🔧 CRITICAL: Sale price numeric match fix
-        
-        **v4.2.5** (2025-11-13)
-        - 🔧 CRITICAL: Multi-status filter
-        
-        **v4.2.3** (2025-11-13)
-        - 🎨 Wildcard matching for COLOR/STRAIN/FLAVOR
         
         [Earlier versions omitted - see git history]
         """)
@@ -1917,8 +1955,8 @@ def main():
             if 'df_csv' in st.session_state:
                 df_csv = st.session_state['df_csv']
                 
-                # Main metrics
-                col1, col2, col3, col4 = st.columns(4)
+                # Main metrics (including cost tracking)
+                col1, col2, col3, col4, col5 = st.columns(5)
                 with col1:
                     st.metric("Total Products", f"{len(df_csv):,}")
                 with col2:
@@ -1936,6 +1974,11 @@ def main():
                         price_issues = (retail_issues | sale_issues).sum()
                         st.metric("Price Issues", f"{price_issues:,}")
                 with col4:
+                    if 'Cost_Diff' in df_csv.columns:
+                        cost_diff_numeric = pd.to_numeric(df_csv['Cost_Diff'], errors='coerce').fillna(0)
+                        cost_issues = (cost_diff_numeric > 0.01).sum()
+                        st.metric("Cost Issues", f"{cost_issues:,}", help="Products where Cost exceeds Max Unit Cost")
+                with col5:
                     if 'Retail_Price_Diff' in df_csv.columns and 'matched_count' in locals():
                         consistency_rate = ((matched_count - price_issues) / matched_count * 100) if matched_count > 0 else 0
                         st.metric("Price Consistency", f"{consistency_rate:.1f}%")
@@ -1975,6 +2018,11 @@ def main():
                         st.write(f"• **{len(matched_with_prices):,} products** have catalog price comparisons")
                         st.write(f"• **{price_issues:,} products** need price adjustments (>$0.01 difference)")
                         st.write(f"• **{len(matched_with_prices) - price_issues:,} products** have consistent pricing")
+                        
+                        # Add cost analysis summary
+                        if 'Cost_Diff' in df_csv.columns and cost_issues > 0:
+                            st.write(f"• **{cost_issues:,} products** have costs exceeding Max Unit Cost")
+                        
                         st.write(f"• Use the **Price Inspector** tab to review and export products needing fixes")
             else:
                 st.info("Upload your Products CSV to see pricing analysis")
@@ -1989,8 +2037,8 @@ def main():
                 
                 df_csv = st.session_state['df_csv']
                 
-                # Summary metrics
-                col1, col2, col3, col4 = st.columns(4)
+                # Summary metrics (including cost)
+                col1, col2, col3, col4, col5 = st.columns(5)
                 with col1:
                     st.metric("📦 Total Products", f"{len(df_csv):,}")
                 with col2:
@@ -2016,6 +2064,11 @@ def main():
                         
                         price_issues = (retail_issues | sale_issues).sum()
                         st.metric("💰 Price Issues", f"{price_issues:,}")
+                with col5:
+                    if 'Cost_Diff' in df_csv.columns:
+                        cost_diff_numeric = pd.to_numeric(df_csv['Cost_Diff'], errors='coerce')
+                        cost_issues = (cost_diff_numeric.fillna(0) > 0.01).sum()
+                        st.metric("📈 Cost Issues", f"{cost_issues:,}")
                 
                 # Data table
                 # v4.3.13 Fix: Convert price strings with $ to numeric for proper display
@@ -2088,15 +2141,26 @@ def main():
                         has_sale_diff = sale_diff_numeric.abs() > 0.01
                         has_any_diff = has_retail_diff | has_sale_diff
                         
+                        # Check for cost differences
+                        if 'Cost_Diff' in matched_with_prices.columns:
+                            cost_diff_numeric = pd.to_numeric(matched_with_prices['Cost_Diff'], errors='coerce').fillna(0)
+                            has_cost_diff = cost_diff_numeric > 0.01
+                        else:
+                            has_cost_diff = pd.Series([False] * len(matched_with_prices))
+                        
+                        # Initially show products with price differences (not cost-only differences)
+                        # Users can add cost differences using the filter if needed
                         products_with_differences = matched_with_prices[has_any_diff].copy()
                         
-                        col1, col2, col3 = st.columns(3)
+                        col1, col2, col3, col4 = st.columns(4)
                         with col1:
                             st.metric("Total Matched with Prices", f"{len(matched_with_prices):,}")
                         with col2:
-                            st.metric("Products with Price Issues", f"{len(products_with_differences):,}")
+                            st.metric("Products with Price Issues", f"{has_any_diff.sum():,}")
                         with col3:
-                            consistency_rate = ((len(matched_with_prices) - len(products_with_differences)) / len(matched_with_prices) * 100) if len(matched_with_prices) > 0 else 100
+                            st.metric("Products with Cost Issues", f"{has_cost_diff.sum():,}")
+                        with col4:
+                            consistency_rate = ((len(matched_with_prices) - has_any_diff.sum()) / len(matched_with_prices) * 100) if len(matched_with_prices) > 0 else 100
                             st.metric("Price Consistency", f"{consistency_rate:.1f}%")
                         
                         # Advanced Filters
@@ -2105,11 +2169,12 @@ def main():
                         filter_col1, filter_col2, filter_col3 = st.columns(3)
                         
                         with filter_col1:
-                            # Price Difference Type filter
-                            price_diff_type = st.selectbox(
-                                "Price Difference Type:",
-                                options=['Any', 'Retail Only', 'Sale Only', 'Both Retail and Sale'],
-                                help="Filter by type of price difference"
+                            # Price Difference Type filter - now multi-select for flexibility
+                            price_diff_types = st.multiselect(
+                                "Show products with these differences:",
+                                options=['Retail Price', 'Sale Price', 'Cost'],
+                                default=['Retail Price', 'Sale Price'],  # Default to price differences only
+                                help="Select which types of differences to show. Most common: Retail + Sale"
                             )
                             
                             # Inventory Status filter
@@ -2169,13 +2234,25 @@ def main():
                         # Apply filters
                         display_df = products_with_differences.copy()
                         
-                        # Apply price difference type filter
-                        if price_diff_type == 'Retail Only':
-                            display_df = display_df[has_retail_diff[display_df.index] & ~has_sale_diff[display_df.index]]
-                        elif price_diff_type == 'Sale Only':
-                            display_df = display_df[~has_retail_diff[display_df.index] & has_sale_diff[display_df.index]]
-                        elif price_diff_type == 'Both Retail and Sale':
-                            display_df = display_df[has_retail_diff[display_df.index] & has_sale_diff[display_df.index]]
+                        # Apply price difference type filter - now supports multiple selections
+                        if price_diff_types:  # If any types are selected
+                            # Build a mask for selected difference types
+                            filter_mask = pd.Series([False] * len(display_df), index=display_df.index)
+                            
+                            if 'Retail Price' in price_diff_types:
+                                filter_mask |= has_retail_diff[display_df.index]
+                            
+                            if 'Sale Price' in price_diff_types:
+                                filter_mask |= has_sale_diff[display_df.index]
+                            
+                            if 'Cost' in price_diff_types and 'Cost_Diff' in display_df.columns:
+                                filter_mask |= has_cost_diff[display_df.index]
+                            
+                            # Apply the combined filter
+                            display_df = display_df[filter_mask]
+                        else:
+                            # If nothing selected, show nothing (or could show all)
+                            display_df = display_df.iloc[:0]  # Empty dataframe
                         
                         # Apply inventory filter
                         if 'Inventory Available' in display_df.columns:
@@ -2217,12 +2294,13 @@ def main():
                         
                         # Display the data
                         if len(display_df) > 0:
-                            # Select display columns
+                            # Select display columns (including Cost columns)
                             display_columns = [
                                 'Product ID', 'Brand', 'Item', 'Catalog_Template', 
                                 'Catalog_Location', 'Inventory Available',
                                 'Unit Price', 'Catalog_Retail_Price', 'Retail_Price_Diff',
                                 'Unit Sale Price', 'Catalog_Sale_Price', 'Sale_Price_Diff',
+                                'Cost per Unit', 'Catalog_Max_Unit_Cost', 'Cost_Diff',
                                 'Catalog_Status_Used'
                             ]
                             
@@ -2232,28 +2310,37 @@ def main():
                             # Create a display copy with properly formatted numeric columns
                             display_for_table = display_df[display_columns].copy()
                             
-                            # Convert price columns to numeric (fixes formatting error)
+                            # FIX: Convert all price columns from string to numeric for display
                             price_columns = ['Unit Price', 'Catalog_Retail_Price', 'Retail_Price_Diff', 
-                                           'Unit Sale Price', 'Catalog_Sale_Price', 'Sale_Price_Diff']
+                                           'Unit Sale Price', 'Catalog_Sale_Price', 'Sale_Price_Diff',
+                                           'Cost per Unit', 'Catalog_Max_Unit_Cost', 'Cost_Diff']
                             for col in price_columns:
                                 if col in display_for_table.columns:
-                                    display_for_table[col] = pd.to_numeric(display_for_table[col], errors='coerce')
+                                    display_for_table[col] = display_for_table[col].apply(clean_price_for_display)
                             
                             # Convert inventory to numeric
                             if 'Inventory Available' in display_for_table.columns:
                                 display_for_table['Inventory Available'] = pd.to_numeric(display_for_table['Inventory Available'], errors='coerce')
                             
                             # Now apply formatting safely
+                            format_dict = {
+                                'Unit Price': '${:.2f}',
+                                'Catalog_Retail_Price': '${:.2f}',
+                                'Retail_Price_Diff': '${:+.2f}',
+                                'Unit Sale Price': '${:.2f}',
+                                'Catalog_Sale_Price': '${:.2f}',
+                                'Sale_Price_Diff': '${:+.2f}',
+                                'Cost per Unit': '${:.2f}',
+                                'Catalog_Max_Unit_Cost': '${:.2f}',
+                                'Cost_Diff': '${:+.2f}',
+                                'Inventory Available': '{:.0f}'
+                            }
+                            
+                            # Only apply formatting for columns that exist
+                            format_dict = {k: v for k, v in format_dict.items() if k in display_for_table.columns}
+                            
                             st.dataframe(
-                                display_for_table.style.format({
-                                    'Unit Price': '${:.2f}',
-                                    'Catalog_Retail_Price': '${:.2f}',
-                                    'Retail_Price_Diff': '${:+.2f}',
-                                    'Unit Sale Price': '${:.2f}',
-                                    'Catalog_Sale_Price': '${:.2f}',
-                                    'Sale_Price_Diff': '${:+.2f}',
-                                    'Inventory Available': '{:.0f}'
-                                }, na_rep='—'),
+                                display_for_table.style.format(format_dict, na_rep='—'),
                                 use_container_width=True
                             )
                             
@@ -2557,37 +2644,46 @@ def main():
         st.markdown(f"""
         **🎯 Product Price Checker v{VERSION} Features:**
         
-        1. **🧹 Clean Codebase (v4.3.3)**
-           - ✅ Organized sections for better maintainability
-           - ✅ Consolidated changelog
-           - ✅ Preserved all matching logic integrity
+        1. **🎯 Improved Filtering (v4.3.15)**
+           - ✅ Multi-select filter for price differences
+           - ✅ Choose any combination: Retail, Sale, Cost
+           - ✅ Defaults to Retail + Sale for typical workflow
+           - ✅ More flexible than single-select options
         
-        2. **💰 Smart Price Extraction (v4.3.2)**
-           - ✅ Automatic fallback to .5 Unit Price fields
-           - ✅ Ensures all product pricing is captured
+        2. **💰 Enhanced Cost Tracking (v4.3.14)**
+           - ✅ Cost per Unit from Company Products
+           - ✅ Max Unit Cost comparison from Product Catalog
+           - ✅ Cost Issues metric showing products over budget
+           - ✅ Fixed Price Inspector display issues
         
-        3. **🔍 Advanced Filtering**
-           - ✅ Price Difference Type: Any, Retail Only, Sale Only, Both
-           - ✅ Inventory Status: All, In Stock Only, Out of Stock Only
-           - ✅ Include/Exclude modes for Brand/Location/Template/Category
+        3. **🏪 12 Store Support**
+           - ✅ All Haven locations mapped
+           - ✅ Including new Hawthorne store
+           - ✅ Automatic shop detection
         
-        4. **💰 Sophisticated Price Logic**
-           - ✅ Numeric match checking for accuracy
-           - ✅ Handles semantic equivalence
-        
-        5. **📄 Blaze POS Export**
-           - ✅ 3-column format ready for bulk upload
-           - ✅ Auto-fills blank sale prices with retail
-           - ✅ Auto-excludes products without pricing
-        
-        6. **📋 Multi-Status Support**
-           - ✅ Choose multiple catalog statuses
-           - ✅ Track which status is used for each product
-        
-        7. **🧠 Smart Matching Engine**
+        4. **🧠 Smart Matching Engine**
            - ✅ 90%+ match accuracy
            - ✅ Weight/keyword extraction
-           - ✅ Wildcard pattern matching
+           - ✅ Wildcard pattern matching (COLOR, STRAIN, FLAVOR)
+           - ✅ Category-specific logic
+        
+        5. **💰 Advanced Price Comparison**
+           - ✅ Retail and Sale price tracking
+           - ✅ Cost vs Max Unit Cost comparison
+           - ✅ Multi-status catalog support
+           - ✅ Automatic fallback to .5 price fields
+        
+        6. **📊 Price Inspector Features**
+           - ✅ Advanced filtering options
+           - ✅ Include/Exclude modes
+           - ✅ Inventory status filters
+           - ✅ Price difference type selection
+        
+        7. **🔥 Blaze POS Export**
+           - ✅ 3-column format ready for bulk upload
+           - ✅ Auto-fills blank sale prices with retail
+           - ✅ Product exclusion capability
+           - ✅ Exact headers: ProductId,Retail Price,Sale Price
         """)
 
 if __name__ == "__main__":
