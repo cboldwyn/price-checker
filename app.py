@@ -1,9 +1,15 @@
 """
-Product Price Checker v4.3.17
+Product Price Checker v4.3.18
 Smart brand matching and price comparison tool for cannabis retail products
 With automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.3.18 (2025-12-13)
+- FIXED: Wildcard matching for complex patterns with "/" characters
+- FIXED: Turn products now match "STRAIN Turn Up/Turn Down" templates
+- Improved regex to handle special characters in strain names
+- Added special handling for Turn Up/Turn Down pattern variations
+
 v4.3.17 (2025-12-13)
 - ADDED: Apparel matching logic with size handling
 - Strips size in parentheses (e.g., "(XS)") for matching
@@ -114,13 +120,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Page configuration
 st.set_page_config(
-    page_title="Product Price Checker v4.3.17",
+    page_title="Product Price Checker v4.3.18",
     page_icon="🛒",
     layout="wide"
 )
 
 # Version and URLs
-VERSION = "4.3.17"
+VERSION = "4.3.18"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -442,6 +448,15 @@ def match_placeholder_pattern(product_name, template_name):
     product_upper = str(product_name).upper()
     template_upper = str(template_name).upper()
     
+    # SPECIAL HANDLING FOR "Turn Up/Turn Down" PATTERN (v4.3.18)
+    # Handle templates with "/" options where product might match just one variant
+    if "TURN UP/TURN DOWN" in template_upper and "TURN" in product_upper:
+        # Normalize the template to handle either variant
+        if "TURN UP" in product_upper:
+            template_upper = template_upper.replace("TURN UP/TURN DOWN", "TURN UP")
+        elif "TURN DOWN" in product_upper:
+            template_upper = template_upper.replace("TURN UP/TURN DOWN", "TURN DOWN")
+    
     # SPECIAL HANDLING FOR STIIIZY STRAIN PATTERNS (v4.3.7)
     # Template: "Stiiizy - STRAIN Black Bag 3.5g" 
     # Product:  "Stiiizy - Black Bag Black Cherry 3.5g"
@@ -499,6 +514,8 @@ def match_wildcard_template(item_text, template, wildcards=['COLOR', 'STRAIN', '
     """
     Match item against template with wildcards (COLOR, STRAIN, FLAVOR)
     Returns (match_found, extracted_values) tuple
+    
+    Improved in v4.3.18 to handle complex patterns like "Turn Up/Turn Down"
     """
     if pd.isna(item_text) or pd.isna(template):
         return False, {}
@@ -519,10 +536,12 @@ def match_wildcard_template(item_text, template, wildcards=['COLOR', 'STRAIN', '
     pattern = re.escape(template_str)
     
     # Replace escaped wildcards with capture groups
+    # Updated regex to handle more characters including /, (), &, etc.
     for wildcard in wildcards:
         escaped_wildcard = re.escape(wildcard)
         if escaped_wildcard in pattern:
-            pattern = pattern.replace(escaped_wildcard, r'([\w\s\-]+?)', 1)
+            # More permissive capture group that handles special characters
+            pattern = pattern.replace(escaped_wildcard, r'([^,]+?)', 1)
     
     # Try to match
     match = re.match(pattern + r'\s*$', item_str, re.IGNORECASE)
@@ -1884,7 +1903,13 @@ def main():
     # Add changelog expander
     with st.sidebar.expander("📋 Version History & Changelog"):
         st.markdown("""
-        **v4.3.17** (Current - 2025-12-13)
+        **v4.3.18** (Current - 2025-12-13)
+        - 🔧 FIXED: Wildcard matching for "/" patterns
+        - ✅ Turn products now match Turn Up/Turn Down templates
+        - 🎯 Improved regex for special characters in strains
+        - 📊 Better handling of complex template patterns
+        
+        **v4.3.17** (2025-12-13)
         - 👕 ADDED: Apparel matching logic with size handling
         - ✂️ Strips size in parentheses for matching
         - 🎯 Matches "California Shirt (XS)" to "California Shirt"
