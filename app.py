@@ -1,9 +1,21 @@
 """
-Product Price Checker v4.3.18
+Product Price Checker v4.3.21
 Smart brand matching and price comparison tool for cannabis retail products
 With automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.3.21 (2025-12-13)
+- CRITICAL FIX: Placeholder and wildcard matching now respects categories
+- Previously matched across categories (Preroll → Flower templates)
+- Example: "Blem - Boasy Preroll 5pk 3.5g" now correctly matches to Preroll templates only
+- Prevents dangerous cross-category price mismatches
+
+v4.3.20 (2025-12-13)
+- FIXED: Troubleshooting tab now shows ALL products including unmatched
+- Previously only showed matched products, missing critical debug info
+- Now properly tracks and displays products that don't find matches
+- Shows brand availability in catalog for unmatched products
+
 v4.3.18 (2025-12-13)
 - FIXED: Wildcard matching for complex patterns with "/" characters
 - FIXED: Turn products now match "STRAIN Turn Up/Turn Down" templates
@@ -120,13 +132,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Page configuration
 st.set_page_config(
-    page_title="Product Price Checker v4.3.18",
+    page_title="Product Price Checker v4.3.21",
     page_icon="🛒",
     layout="wide"
 )
 
 # Version and URLs
-VERSION = "4.3.18"
+VERSION = "4.3.21"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -1080,12 +1092,16 @@ def add_smart_brand_matching(company_df, catalog_df):
                     })
                     break
         
-        # 2. Try placeholder pattern match - WITH SPECIFICITY SCORING
+        # 2. Try placeholder pattern match - WITH SPECIFICITY SCORING AND CATEGORY CHECKING
         if not match_found and brand in brand_catalog_map:
             placeholder_candidates = []
             
-            # Collect ALL placeholder pattern matches
-            for template in brand_catalog_map[brand]:
+            # CRITICAL FIX: Only check templates from the SAME CATEGORY
+            brand_category_key = f"{brand}|{category}"
+            templates_to_check = brand_category_catalog_map.get(brand_category_key, [])
+            
+            # Collect ALL placeholder pattern matches FROM SAME CATEGORY
+            for template in templates_to_check:
                 if match_placeholder_pattern(item, template):
                     # Score by number of matching words (more specific = higher score)
                     item_words = set(item.lower().split())
@@ -1133,12 +1149,16 @@ def add_smart_brand_matching(company_df, catalog_df):
                     'Notes': notes
                 })
         
-        # 3. Try wildcard match - WITH SPECIFICITY SCORING
+        # 3. Try wildcard match - WITH SPECIFICITY SCORING AND CATEGORY CHECKING
         if not match_found and brand in brand_catalog_map:
             wildcard_candidates = []
             
-            # Collect ALL wildcard matches
-            for template in brand_catalog_map[brand]:
+            # CRITICAL FIX: Only check templates from the SAME CATEGORY
+            brand_category_key = f"{brand}|{category}"
+            templates_to_check = brand_category_catalog_map.get(brand_category_key, [])
+            
+            # Collect ALL wildcard matches FROM SAME CATEGORY
+            for template in templates_to_check:
                 is_wildcard_match, extracted_wildcards = match_wildcard_template(item, template)
                 if is_wildcard_match:
                     # Score by number of matching words (more specific = higher score)
@@ -1280,6 +1300,16 @@ def add_smart_brand_matching(company_df, catalog_df):
         
         if not match_found:
             no_matches += 1
+            # ADD UNMATCHED PRODUCTS TO TROUBLESHOOTING DATA!
+            troubleshooting_data.append({
+                'Brand': brand,
+                'Item': item,
+                'Shop': shop,
+                'Match_Status': 'No match found',
+                'Catalog_Template': None,
+                'Catalog_Options': f"{len(brand_catalog_map.get(brand, []))} options" if brand in brand_catalog_map else '0 options',
+                'Notes': f'Brand {"found" if brand in brand_catalog_map else "NOT"} in catalog'
+            })
     
     progress_bar.progress(1.0)
     
@@ -1781,6 +1811,20 @@ def main():
     else:
         st.sidebar.info(f"✅ Using {len(catalog_statuses)} statuses: {', '.join(catalog_statuses)}")
     
+    # Add Brand Filtering Option
+    st.sidebar.subheader("🏷️ Brand Filtering")
+    filter_by_catalog_brands = st.sidebar.checkbox(
+        "Only include brands in Product Catalog",
+        value=True,
+        help="When checked, only processes brands that exist in the Product Catalog. "
+             "Uncheck to include ALL brands (non-catalog brands won't have price matching)."
+    )
+    
+    if filter_by_catalog_brands:
+        st.sidebar.info("🎯 Only catalog brands will be processed")
+    else:
+        st.sidebar.warning("⚠️ Including ALL brands (non-catalog brands won't match)")
+    
     st.sidebar.subheader("📄 Upload Products CSV")
     uploaded_file = st.sidebar.file_uploader(
         "Upload CSV (Company or Single Shop):",
@@ -1903,7 +1947,19 @@ def main():
     # Add changelog expander
     with st.sidebar.expander("📋 Version History & Changelog"):
         st.markdown("""
-        **v4.3.18** (Current - 2025-12-13)
+        **v4.3.21** (Current - 2025-12-13)
+        - 🚨 CRITICAL: Fixed cross-category matching bug
+        - ✅ Placeholder/wildcard matching now respects categories
+        - 🎯 Prerolls only match to Preroll templates
+        - 🔒 Prevents dangerous price mismatches
+        
+        **v4.3.20** (2025-12-13)
+        - 🔧 FIXED: Troubleshooting tab shows ALL products
+        - ✅ Now includes unmatched products for debugging
+        - 📊 Shows brand availability in catalog
+        - 🎯 Better visibility into matching failures
+        
+        **v4.3.18** (2025-12-13)
         - 🔧 FIXED: Wildcard matching for "/" patterns
         - ✅ Turn products now match Turn Up/Turn Down templates
         - 🎯 Improved regex for special characters in strains
