@@ -4,6 +4,11 @@ Smart brand matching and price comparison tool for cannabis retail products
 With automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.3.22 (2025-01-26)
+- CHANGED: Default catalog price sources now Active, New Product, DNO
+- Updated from Active/New Price/New Product to include DNO status by default
+- Streamlines workflow by including DNO (Do Not Order) products in price comparisons
+
 v4.3.21 (2025-12-13)
 - CRITICAL FIX: Placeholder and wildcard matching now respects categories
 - Previously matched across categories (Preroll → Flower templates)
@@ -132,13 +137,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Page configuration
 st.set_page_config(
-    page_title="Product Price Checker v4.3.21",
+    page_title="Product Price Checker v4.3.22",
     page_icon="🛒",
     layout="wide"
 )
 
 # Version and URLs
-VERSION = "4.3.21"
+VERSION = "4.3.22"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -1797,7 +1802,7 @@ def main():
     catalog_statuses = st.sidebar.multiselect(
         "Which catalog statuses to use for pricing:",
         options=available_statuses,
-        default=['Active', 'New Price', 'New Product'],
+        default=['Active', 'New Product', 'DNO'],
         help="Select one or more catalog statuses. Products with these statuses will be used for price comparison."
     )
     
@@ -1842,7 +1847,7 @@ def main():
     if 'detection_complete' not in st.session_state:
         st.session_state['detection_complete'] = False
     if 'catalog_statuses' not in st.session_state:
-        st.session_state['catalog_statuses'] = ['Active', 'New Price', 'New Product']
+        st.session_state['catalog_statuses'] = ['Active', 'New Product', 'DNO']
     
     # Update catalog statuses in session state
     if st.session_state.get('catalog_statuses') != catalog_statuses:
