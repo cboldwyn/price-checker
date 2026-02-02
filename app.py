@@ -4,10 +4,43 @@ Smart brand matching and price comparison tool for cannabis retail products
 With automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.3.25 (2025-02-02)
+- FEATURE: Added inventory filtering to Weight Validation tab
+- NEW: "Inventory Status" filter with options: All Products, In Stock Only, Out of Stock Only
+- NEW: Defaults to "In Stock Only" to focus on products customers can buy
+- NEW: Min Inventory threshold setting for custom stock levels
+- NEW: In-stock product metrics showing cannabis products with current inventory
+- ENHANCEMENT: Inventory Available column added to weight validation results
+- ENHANCEMENT: Descriptive filenames include inventory status (e.g., "weight_validation_in_stock_only.csv")
+- ENHANCEMENT: Download button shows in-stock product count
+- VALUE: Focus weight validation fixes on products with current inventory
+
+v4.3.24 (2025-02-02)
+- CRITICAL FIX: Gram-to-milligram conversion in Weight Per Unit field
+- FIXED: "1000.0 mg" now correctly converts to 1.0g (was converting to 1000.0g)
+- FIXED: Weight Per Unit "Custom" now properly combines Custom Weight Measurement + Custom Weight Type
+- FIXED: Category spelling "Specialty Edibles" (was "Specialy Edibles" causing empty allowed options)
+- FIXED: Weight extraction pattern priority - "3.5g" now correctly extracted (was getting ".5g")
+- Enhanced weight extraction function to handle measurement + type combinations
+
+v4.3.23 (2025-02-02)
+- FIXED: Weight extraction for decimal weights (.5g, .75g now correctly extracted)
+- FIXED: Weight extraction for mg units (100mg, 500mg now properly detected)  
+- FIXED: Weight extraction for standalone numbers (Slurricane 3.5 → 3.5g)
+- UPDATED: Preroll category now allows Each and Full g (was incorrectly Custom only)
+- ENHANCEMENT: Non-cannabis categories (Accessories, Apparel) excluded from weight validation
+- ENHANCEMENT: Advanced filtering in Weight Validation tab (search, weight ranges, shops)
+- ENHANCEMENT: Issue analysis by category and detailed breakdown
+- ENHANCEMENT: Descriptive filenames for weight validation downloads
+
 v4.3.22 (2025-01-26)
+- FEATURE: Added comprehensive Weight Validation functionality
+- Validates product weights from name vs Weight Per Unit field settings
+- Checks if Weight Per Unit options are valid for each product category
+- New Weight Validation tab with filtering and export capabilities
+- Weight conversion: mg to grams (500mg = 0.5g), oz to grams
 - CHANGED: Default catalog price sources now Active, New Product, DNO
 - Updated from Active/New Price/New Product to include DNO status by default
-- Streamlines workflow by including DNO (Do Not Order) products in price comparisons
 
 v4.3.21 (2025-12-13)
 - CRITICAL FIX: Placeholder and wildcard matching now respects categories
@@ -137,13 +170,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Page configuration
 st.set_page_config(
-    page_title="Product Price Checker v4.3.22",
+    page_title="Product Price Checker v4.3.25",
     page_icon="🛒",
     layout="wide"
 )
 
 # Version and URLs
-VERSION = "4.3.22"
+VERSION = "4.3.25"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # Shop name mapping between Company Products and Product Catalog
@@ -177,8 +210,287 @@ EXCLUDED_CATEGORIES = [
 ]
 
 # ============================================================================
+# WEIGHT VALIDATION CONFIGURATION  
+# ============================================================================
+
+# Categories to EXCLUDE from weight validation (non-cannabis products)
+WEIGHT_VALIDATION_EXCLUDED_CATEGORIES = [
+    'Accessories', 'Accessories (under $5)', 'Apparel',
+    'Display', 'Clones', 'Sample', 'Promo', 'Compassion', 
+    'Donation', 'Boxes', 'Non-Cannabis', 'Gift Cards', 'xxxDONOTUSE-Buzzers'
+]
+
+# Weight Per Unit to actual weight mapping
+WEIGHT_PER_UNIT_MAPPING = {
+    'Custom': 'Custom',  # Uses Custom Weight Measurement field
+    'Each': '1g',
+    'Eighth': '3.5g', 
+    'Full g': '1g',
+    'Half g': '0.5g'
+}
+
+# Valid Weight Per Unit options by category (UPDATED with correct rules)
+VALID_WEIGHT_OPTIONS_BY_CATEGORY = {
+    'Baked Goods': ['Custom'],
+    'Chocolates': ['Custom'],
+    'Drinks': ['Custom'],
+    'Extract': ['Custom', 'Each', 'Full g'],
+    'Flower': ['Custom', 'Eighth'],
+    'Gummies': ['Custom'],
+    'Preroll': ['Custom', 'Each', 'Full g'],  # FIXED: Added Each and Full g
+    'Specialty Edibles': ['Custom'],  # FIXED: Corrected spelling (was Specialy)
+    'Tincture': ['Custom'],
+    'Topical': ['Custom'],
+    'Vape': ['Custom', 'Each', 'Full g'],
+    # Non-cannabis categories (included for completeness but will be excluded from validation)
+    'Accessories': ['Each'],
+    'Accessories (under $5)': ['Each'],
+    'Apparel': ['Each']
+}
+
+# Default Custom Weight Measurement units by category
+DEFAULT_CUSTOM_UNITS_BY_CATEGORY = {
+    'Baked Goods': 'mg',
+    'Chocolates': 'mg', 
+    'Drinks': 'mg',
+    'Extract': 'g',
+    'Flower': 'g',
+    'Gummies': 'mg',
+    'Preroll': 'g',
+    'Specialty Edibles': 'mg',  # FIXED: Corrected spelling
+    'Tincture': 'mg',
+    'Topical': 'mg',
+    'Vape': 'mg'
+}
+
+# ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
+
+def normalize_weight_to_grams(weight_str):
+    """
+    Convert weight string to grams for comparison
+    
+    Args:
+        weight_str: Weight string like '3.5g', '500mg', '1oz', etc.
+        
+    Returns:
+        float or None: Weight in grams, or None if cannot parse
+    """
+    if pd.isna(weight_str) or not weight_str:
+        return None
+    
+    weight_str = str(weight_str).lower().strip()
+    
+    # Handle common patterns
+    try:
+        # Grams (g)
+        if weight_str.endswith('g') and not weight_str.endswith('mg'):
+            return float(weight_str[:-1])
+        
+        # Milligrams (mg) - convert to grams
+        elif weight_str.endswith('mg'):
+            return float(weight_str[:-2]) / 1000
+        
+        # Ounces (oz) - convert to grams (1 oz = 28.3495g)
+        elif weight_str.endswith('oz'):
+            return float(weight_str[:-2]) * 28.3495
+        
+        # Fractions in ounces
+        elif '/' in weight_str and 'oz' in weight_str:
+            # Handle patterns like "1/8 oz", "1/4oz"
+            fraction_part = weight_str.replace('oz', '').strip()
+            if '/' in fraction_part:
+                numerator, denominator = fraction_part.split('/')
+                return (float(numerator) / float(denominator)) * 28.3495
+        
+        # Just a number - assume grams
+        else:
+            try:
+                return float(weight_str)
+            except:
+                return None
+    
+    except (ValueError, ZeroDivisionError):
+        return None
+
+def get_weight_from_weight_per_unit(weight_per_unit, custom_weight_measurement, custom_weight_type=None):
+    """
+    Get the actual weight from Weight Per Unit field
+    
+    Args:
+        weight_per_unit: Value from Weight Per Unit field
+        custom_weight_measurement: Value from Custom Weight Measurement field
+        custom_weight_type: Value from Custom Weight Type field (e.g., 'mg', 'g')
+        
+    Returns:
+        float or None: Weight in grams, or None if cannot determine
+    """
+    if pd.isna(weight_per_unit):
+        return None
+    
+    weight_per_unit_str = str(weight_per_unit).strip()
+    
+    # Check if it's a mapped value
+    if weight_per_unit_str in WEIGHT_PER_UNIT_MAPPING:
+        mapped_weight = WEIGHT_PER_UNIT_MAPPING[weight_per_unit_str]
+        
+        if mapped_weight == 'Custom':
+            # Use Custom Weight Measurement field + Custom Weight Type
+            if pd.notna(custom_weight_measurement):
+                measurement_str = str(custom_weight_measurement).strip()
+                
+                # If we have a custom weight type, combine them
+                if pd.notna(custom_weight_type):
+                    type_str = str(custom_weight_type).strip()
+                    combined_weight = f"{measurement_str}{type_str}"
+                    return normalize_weight_to_grams(combined_weight)
+                else:
+                    # Try to parse measurement directly (may have units embedded)
+                    return normalize_weight_to_grams(measurement_str)
+            else:
+                return None
+        else:
+            # Use the mapped weight value
+            return normalize_weight_to_grams(mapped_weight)
+    
+    # Try to parse directly as weight
+    return normalize_weight_to_grams(weight_per_unit_str)
+
+def validate_weight_per_unit_for_category(category, weight_per_unit):
+    """
+    Check if Weight Per Unit value is valid for the given category
+    
+    Args:
+        category: Product category
+        weight_per_unit: Weight Per Unit value
+        
+    Returns:
+        tuple: (is_valid, allowed_options)
+    """
+    if pd.isna(category) or pd.isna(weight_per_unit):
+        return False, []
+    
+    category_str = str(category).strip()
+    weight_per_unit_str = str(weight_per_unit).strip()
+    
+    # Get allowed options for this category
+    allowed_options = VALID_WEIGHT_OPTIONS_BY_CATEGORY.get(category_str, [])
+    
+    # Check if the weight per unit is in allowed options
+    is_valid = weight_per_unit_str in allowed_options
+    
+    return is_valid, allowed_options
+
+def add_weight_validation(df):
+    """
+    Add weight validation columns to the dataframe
+    
+    Args:
+        df: DataFrame with product data
+        
+    Returns:
+        DataFrame: With added weight validation columns
+    """
+    if df is None or df.empty:
+        return df
+    
+    st.info("⚖️ Adding weight validation analysis...")
+    
+    # EXCLUDE non-cannabis categories from weight validation
+    cannabis_df = df[~df['Category'].isin(WEIGHT_VALIDATION_EXCLUDED_CATEGORIES)].copy() if 'Category' in df.columns else df.copy()
+    excluded_count = len(df) - len(cannabis_df)
+    
+    if excluded_count > 0:
+        excluded_categories = df[df['Category'].isin(WEIGHT_VALIDATION_EXCLUDED_CATEGORIES)]['Category'].unique()
+        st.info(f"🚫 Excluded {excluded_count:,} non-cannabis products from weight validation ({', '.join(excluded_categories)})")
+    
+    # Initialize validation columns for ALL products (including excluded ones)
+    df['Product_Name_Weight_Grams'] = None
+    df['Weight_Per_Unit_Weight_Grams'] = None
+    df['Weight_Match'] = None
+    df['Weight_Difference_Grams'] = None
+    df['Weight_Per_Unit_Valid_For_Category'] = None
+    df['Weight_Per_Unit_Allowed_Options'] = None
+    df['Weight_Validation_Issues'] = None
+    
+    # Mark excluded categories as "excluded from validation"
+    if excluded_count > 0:
+        excluded_mask = df['Category'].isin(WEIGHT_VALIDATION_EXCLUDED_CATEGORIES)
+        df.loc[excluded_mask, 'Weight_Validation_Issues'] = 'Excluded from weight validation (non-cannabis product)'
+    
+    validation_issues = 0
+    weight_matches = 0
+    invalid_category_options = 0
+    
+    # Only validate cannabis products
+    for idx, row in cannabis_df.iterrows():
+        issues = []
+        
+        # 1. Get weight from product name (source of truth)
+        if 'Extracted_Weight' in df.columns:
+            product_name_weight = normalize_weight_to_grams(row.get('Extracted_Weight'))
+            df.at[idx, 'Product_Name_Weight_Grams'] = product_name_weight
+        else:
+            product_name_weight = None
+        
+        # 2. Get weight from Weight Per Unit field
+        weight_per_unit_weight = get_weight_from_weight_per_unit(
+            row.get('Weight Per Unit'), 
+            row.get('Custom Weight Measurement'),
+            row.get('Custom Weight Type')
+        )
+        df.at[idx, 'Weight_Per_Unit_Weight_Grams'] = weight_per_unit_weight
+        
+        # 3. Compare weights (if both available)
+        if product_name_weight is not None and weight_per_unit_weight is not None:
+            weight_diff = abs(product_name_weight - weight_per_unit_weight)
+            df.at[idx, 'Weight_Difference_Grams'] = weight_diff
+            
+            # Consider weights matching if within 0.1g tolerance
+            if weight_diff <= 0.1:
+                df.at[idx, 'Weight_Match'] = True
+                weight_matches += 1
+            else:
+                df.at[idx, 'Weight_Match'] = False
+                issues.append(f"Weight mismatch: Product name {product_name_weight}g vs Weight Per Unit {weight_per_unit_weight}g")
+        elif product_name_weight is None:
+            issues.append("No weight found in product name")
+        elif weight_per_unit_weight is None:
+            issues.append("Cannot determine weight from Weight Per Unit field")
+        
+        # 4. Validate Weight Per Unit for category
+        category = row.get('Category')
+        weight_per_unit = row.get('Weight Per Unit')
+        
+        is_valid, allowed_options = validate_weight_per_unit_for_category(category, weight_per_unit)
+        df.at[idx, 'Weight_Per_Unit_Valid_For_Category'] = is_valid
+        df.at[idx, 'Weight_Per_Unit_Allowed_Options'] = ', '.join(allowed_options) if allowed_options else ''
+        
+        if not is_valid and not pd.isna(weight_per_unit):
+            invalid_category_options += 1
+            issues.append(f"'{weight_per_unit}' not valid for {category}. Allowed: {', '.join(allowed_options)}")
+        
+        # 5. Store issues
+        if issues:
+            df.at[idx, 'Weight_Validation_Issues'] = '; '.join(issues)
+            validation_issues += 1
+    
+    # Report results (only for cannabis products)
+    cannabis_products = len(cannabis_df)
+    st.success(f"⚖️ Weight validation complete!")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Cannabis Products", f"{cannabis_products:,}")
+    with col2:
+        st.metric("Weight Matches", f"{weight_matches:,}")
+    with col3:
+        st.metric("Validation Issues", f"{validation_issues:,}")
+    with col4:
+        st.metric("Invalid Category Options", f"{invalid_category_options:,}")
+    
+    return df
 
 def detect_csv_type(df):
     """
@@ -288,28 +600,39 @@ def extract_weight_from_item(item_text):
     item_str = str(item_text).strip()
     
     # Try patterns at end of string first (most common)
+    # IMPORTANT: Order matters! More specific patterns first
     end_patterns = [
-        r'(\d+\.?\d*g)$',
-        r'(\d+\.\d+\s?oz?)$',
-        r'(\d+\s?oz?)$',
-        r'(1/8\s?oz?)$',
-        r'(1/4\s?oz?)$',
-        r'(1/2\s?oz?)$',
+        r'(\d+\.?\d*mg)$',           # matches "100mg", "500mg"
+        r'(\d+\.\d+g)$',             # matches "3.5g", "1.75g" - MOVED UP for priority
+        r'(\.\d+g)$',                # matches ".5g", ".75g" - MOVED DOWN  
+        r'(\d+\.?\d*g)$',            # matches "1g", "3g"
+        r'(\d+\.?\d*\s?oz?)$',       # matches "1oz", "1 oz"
+        r'(1/8\s?oz?)$',             # matches "1/8oz", "1/8 oz"
+        r'(1/4\s?oz?)$',             # matches "1/4oz"
+        r'(1/2\s?oz?)$',             # matches "1/2oz"
+        r'(\d+\.?\d*)$',             # matches standalone numbers like "3.5"
     ]
     
     for pattern in end_patterns:
         match = re.search(pattern, item_str, re.IGNORECASE)
         if match:
-            return match.group(1).lower().replace(' ', '')
+            result = match.group(1).lower().replace(' ', '')
+            # If it's just a number (last pattern), add 'g' unit
+            if pattern == r'(\d+\.?\d*)$' and result.replace('.','').isdigit():
+                result += 'g'
+            return result
     
     # If not found at end, try finding anywhere in string (for cases like "3.75g 5pk")
+    # IMPORTANT: Order matters! More specific patterns first
     anywhere_patterns = [
-        r'(\d+\.?\d*g)',
-        r'(\d+\.\d+\s?oz?)',
-        r'(\d+\s?oz?)',
-        r'(1/8\s?oz?)',
-        r'(1/4\s?oz?)',
-        r'(1/2\s?oz?)',
+        r'(\d+\.?\d*mg)',            # matches "100mg" anywhere
+        r'(\d+\.\d+g)',              # matches "3.5g", "1.75g" anywhere - MOVED UP
+        r'(\.\d+g)',                 # matches ".5g", ".75g" anywhere - MOVED DOWN
+        r'(\d+\.?\d*g)',             # matches "1g", "3g" anywhere
+        r'(\d+\.?\d*\s?oz?)',        # matches "1oz" anywhere
+        r'(1/8\s?oz?)',              # matches "1/8oz" anywhere
+        r'(1/4\s?oz?)',              # matches "1/4oz" anywhere
+        r'(1/2\s?oz?)',              # matches "1/2oz" anywhere
     ]
     
     for pattern in anywhere_patterns:
@@ -2056,6 +2379,8 @@ def main():
                         
                         if connect_catalog_df is not None:
                             filtered_csv = add_smart_brand_matching(filtered_csv, connect_catalog_df)
+                            # Add weight validation after smart matching
+                            filtered_csv = add_weight_validation(filtered_csv)
                             # Pass the selected catalog statuses for price comparison
                             filtered_csv = add_simple_price_comparison(filtered_csv, connect_catalog_df, selected_statuses=catalog_statuses)
                         
@@ -2093,6 +2418,8 @@ def main():
             tab_names.append("📄 Products")
             if 'Catalog_Match_Found' in st.session_state['df_csv'].columns and st.session_state['df_csv']['Catalog_Match_Found'].sum() > 0:
                 tab_names.append("💰 Price Inspector")
+            if 'Weight_Validation_Issues' in st.session_state['df_csv'].columns:
+                tab_names.append("⚖️ Weight Validation")
             if 'troubleshooting_data' in st.session_state:
                 tab_names.append("🔧 Troubleshooting")
         if 'df_catalog' in st.session_state:
@@ -2584,6 +2911,314 @@ def main():
                             st.warning("No products match the selected filters.")
                 
                 tab_index += 1
+        
+        # WEIGHT VALIDATION TAB
+        if 'df_csv' in st.session_state and 'Weight_Validation_Issues' in st.session_state['df_csv'].columns:
+            with tabs[tab_index]:
+                st.subheader("⚖️ Weight Validation")
+                st.info("Review weight validation results and identify weight inconsistencies")
+                
+                df_csv = st.session_state['df_csv']
+                
+                # Calculate metrics excluding non-cannabis by default
+                cannabis_df = df_csv[~df_csv['Category'].isin(WEIGHT_VALIDATION_EXCLUDED_CATEGORIES)] if 'Category' in df_csv.columns else df_csv
+                excluded_count = len(df_csv) - len(cannabis_df)
+                
+                # Weight validation summary metrics (cannabis products only)
+                cannabis_products = len(cannabis_df)
+                weight_matches = cannabis_df['Weight_Match'].sum() if 'Weight_Match' in cannabis_df.columns else 0
+                products_with_issues = cannabis_df['Weight_Validation_Issues'].notna().sum()
+                invalid_category_options = (cannabis_df['Weight_Per_Unit_Valid_For_Category'] == False).sum()
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("🌿 Cannabis Products", f"{cannabis_products:,}")
+                with col2:
+                    st.metric("✅ Weight Matches", f"{weight_matches:,}")
+                with col3:
+                    st.metric("⚠️ Validation Issues", f"{products_with_issues:,}")
+                with col4:
+                    st.metric("❌ Invalid Category Options", f"{invalid_category_options:,}")
+                
+                if excluded_count > 0:
+                    st.info(f"🚫 Excluded {excluded_count:,} non-cannabis products (Accessories, Apparel) from validation")
+                
+                # Enhanced Filters
+                st.markdown("### 🔍 Advanced Filters")
+                
+                # Filter Row 1: Main filters
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    validation_filter = st.selectbox(
+                        "Validation Status:",
+                        options=["All Cannabis Products", "Issues Only", "Weight Matches", "Weight Mismatches", 
+                                "Invalid Category Options", "Missing Product Weight", "Missing Weight Per Unit", "All Products (Including Non-Cannabis)"],
+                        key="weight_validation_filter",
+                        help="Filter by validation status. 'All Cannabis Products' excludes Accessories/Apparel by default."
+                    )
+                
+                with col2:
+                    category_filter = st.multiselect(
+                        "Categories:",
+                        options=sorted(df_csv['Category'].unique()) if 'Category' in df_csv.columns else [],
+                        key="weight_validation_category_filter",
+                        help="Select specific categories to analyze"
+                    )
+                
+                with col3:
+                    brand_filter = st.multiselect(
+                        "Brands:",
+                        options=sorted(df_csv['Brand'].unique()) if 'Brand' in df_csv.columns else [],
+                        key="weight_validation_brand_filter",
+                        help="Select specific brands to analyze"
+                    )
+                
+                # Filter Row 2: Advanced filters
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    weight_per_unit_filter = st.multiselect(
+                        "Weight Per Unit:",
+                        options=sorted(df_csv['Weight Per Unit'].dropna().unique()) if 'Weight Per Unit' in df_csv.columns else [],
+                        key="weight_per_unit_filter",
+                        help="Filter by Weight Per Unit value"
+                    )
+                
+                with col2:
+                    shop_filter = st.multiselect(
+                        "Shops:",
+                        options=sorted(df_csv['Shop'].unique()) if 'Shop' in df_csv.columns else [],
+                        key="weight_validation_shop_filter",
+                        help="Filter by specific shops"
+                    )
+                
+                with col3:
+                    search_term = st.text_input(
+                        "Search Product Name:",
+                        key="weight_validation_search",
+                        help="Search in product names"
+                    )
+                
+                # Filter Row 3: Weight range filters
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    weight_difference_min = st.number_input(
+                        "Min Weight Difference (g):",
+                        min_value=0.0,
+                        value=0.0,
+                        step=0.1,
+                        key="weight_diff_min",
+                        help="Minimum weight difference to show (in grams)"
+                    )
+                
+                with col2:
+                    weight_difference_max = st.number_input(
+                        "Max Weight Difference (g):",
+                        min_value=0.0,
+                        value=1000.0,
+                        step=0.1,
+                        key="weight_diff_max",
+                        help="Maximum weight difference to show (in grams)"
+                    )
+                
+                # Filter Row 4: Inventory filter
+                st.markdown("##### 📦 Inventory Focus")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    inventory_filter = st.selectbox(
+                        "Inventory Status:",
+                        options=["All Products", "In Stock Only", "Out of Stock Only"],
+                        index=1,  # Default to "In Stock Only" 
+                        key="weight_validation_inventory_filter",
+                        help="Focus on products with current inventory to prioritize fixes"
+                    )
+                
+                with col2:
+                    min_inventory = st.number_input(
+                        "Min Inventory:",
+                        min_value=0,
+                        value=1 if inventory_filter == "In Stock Only" else 0,
+                        key="weight_min_inventory",
+                        help="Minimum inventory quantity to show"
+                    )
+                
+                with col3:
+                    if 'Inventory Available' in df_csv.columns:
+                        total_in_stock = (df_csv['Inventory Available'] > 0).sum()
+                        total_cannabis_in_stock = (cannabis_df['Inventory Available'] > 0).sum() if 'Inventory Available' in cannabis_df.columns else 0
+                        st.metric("🌿 Cannabis In Stock", f"{total_cannabis_in_stock:,}")
+                        st.caption(f"Total: {total_in_stock:,}")
+                
+                # Apply filters
+                filtered_df = df_csv.copy()
+                
+                # Main validation status filter
+                if validation_filter == "All Cannabis Products":
+                    filtered_df = filtered_df[~filtered_df['Category'].isin(WEIGHT_VALIDATION_EXCLUDED_CATEGORIES)]
+                elif validation_filter == "Issues Only":
+                    filtered_df = filtered_df[
+                        (~filtered_df['Category'].isin(WEIGHT_VALIDATION_EXCLUDED_CATEGORIES)) &
+                        (filtered_df['Weight_Validation_Issues'].notna()) &
+                        (~filtered_df['Weight_Validation_Issues'].str.contains('Excluded from weight validation', na=False))
+                    ]
+                elif validation_filter == "Weight Matches":
+                    filtered_df = filtered_df[filtered_df['Weight_Match'] == True]
+                elif validation_filter == "Weight Mismatches":
+                    filtered_df = filtered_df[filtered_df['Weight_Match'] == False]
+                elif validation_filter == "Invalid Category Options":
+                    filtered_df = filtered_df[filtered_df['Weight_Per_Unit_Valid_For_Category'] == False]
+                elif validation_filter == "Missing Product Weight":
+                    filtered_df = filtered_df[
+                        (~filtered_df['Category'].isin(WEIGHT_VALIDATION_EXCLUDED_CATEGORIES)) &
+                        (filtered_df['Product_Name_Weight_Grams'].isna())
+                    ]
+                elif validation_filter == "Missing Weight Per Unit":
+                    filtered_df = filtered_df[
+                        (~filtered_df['Category'].isin(WEIGHT_VALIDATION_EXCLUDED_CATEGORIES)) &
+                        (filtered_df['Weight_Per_Unit_Weight_Grams'].isna())
+                    ]
+                # "All Products (Including Non-Cannabis)" - no filtering
+                
+                # Category filter
+                if category_filter:
+                    filtered_df = filtered_df[filtered_df['Category'].isin(category_filter)]
+                
+                # Brand filter
+                if brand_filter:
+                    filtered_df = filtered_df[filtered_df['Brand'].isin(brand_filter)]
+                
+                # Weight Per Unit filter
+                if weight_per_unit_filter:
+                    filtered_df = filtered_df[filtered_df['Weight Per Unit'].isin(weight_per_unit_filter)]
+                
+                # Shop filter
+                if shop_filter:
+                    filtered_df = filtered_df[filtered_df['Shop'].isin(shop_filter)]
+                
+                # Search filter
+                if search_term:
+                    search_mask = filtered_df['Item'].str.contains(search_term, case=False, na=False) if 'Item' in filtered_df.columns else False
+                    filtered_df = filtered_df[search_mask]
+                
+                # Weight difference range filter
+                if 'Weight_Difference_Grams' in filtered_df.columns:
+                    weight_diff_mask = (
+                        (filtered_df['Weight_Difference_Grams'] >= weight_difference_min) &
+                        (filtered_df['Weight_Difference_Grams'] <= weight_difference_max)
+                    )
+                    # Only apply if we have weight difference data
+                    if weight_diff_mask.any():
+                        filtered_df = filtered_df[weight_diff_mask | filtered_df['Weight_Difference_Grams'].isna()]
+                
+                # Inventory filter - FOCUS ON PRODUCTS IN STOCK
+                if 'Inventory Available' in filtered_df.columns:
+                    if inventory_filter == "In Stock Only":
+                        before_inventory = len(filtered_df)
+                        filtered_df = filtered_df[filtered_df['Inventory Available'] >= min_inventory]
+                        after_inventory = len(filtered_df)
+                        if before_inventory != after_inventory:
+                            st.info(f"📦 Inventory filter: {after_inventory:,} products in stock (removed {before_inventory - after_inventory:,} out-of-stock)")
+                    elif inventory_filter == "Out of Stock Only":
+                        before_inventory = len(filtered_df)
+                        filtered_df = filtered_df[filtered_df['Inventory Available'] < min_inventory]
+                        after_inventory = len(filtered_df)
+                        if before_inventory != after_inventory:
+                            st.info(f"📦 Inventory filter: {after_inventory:,} out-of-stock products (removed {before_inventory - after_inventory:,} in-stock)")
+                    # "All Products" - no inventory filtering
+                
+                if len(filtered_df) > 0:
+                    # Select relevant columns for weight validation
+                    weight_columns = [
+                        'Shop', 'Brand', 'Item', 'Category', 'Inventory Available',
+                        'Weight Per Unit', 'Custom Weight Measurement', 'Custom Weight Type',
+                        'Extracted_Weight', 'Product_Name_Weight_Grams', 'Weight_Per_Unit_Weight_Grams',
+                        'Weight_Match', 'Weight_Difference_Grams',
+                        'Weight_Per_Unit_Valid_For_Category', 'Weight_Per_Unit_Allowed_Options',
+                        'Weight_Validation_Issues'
+                    ]
+                    
+                    # Only include columns that exist
+                    available_columns = [col for col in weight_columns if col in filtered_df.columns]
+                    display_df = filtered_df[available_columns].copy()
+                    
+                    st.markdown(f"### 📊 Results ({len(display_df):,} products)")
+                    
+                    # Show the data
+                    st.dataframe(display_df, use_container_width=True)
+                    
+                    # Download button with descriptive filename
+                    csv_buffer = io.StringIO()
+                    display_df.to_csv(csv_buffer, index=False)
+                    
+                    # Generate descriptive filename
+                    filename_parts = ["weight_validation"]
+                    if validation_filter != "All Cannabis Products":
+                        filename_parts.append(validation_filter.lower().replace(" ", "_"))
+                    if inventory_filter != "All Products":
+                        filename_parts.append(inventory_filter.lower().replace(" ", "_"))
+                    if category_filter:
+                        filename_parts.append(f"{'_'.join(category_filter[:2])}")  # Limit to 2 categories for filename
+                    if brand_filter:
+                        filename_parts.append(f"{'_'.join(brand_filter[:2])}")  # Limit to 2 brands for filename
+                    
+                    filename = "_".join(filename_parts) + ".csv"
+                    
+                    # Enhanced download button
+                    in_stock_count = (display_df['Inventory Available'] > 0).sum() if 'Inventory Available' in display_df.columns else 0
+                    download_label = f"📥 Download Results ({len(display_df):,} products"
+                    if 'Inventory Available' in display_df.columns and inventory_filter == "In Stock Only":
+                        download_label += f", {in_stock_count:,} in stock)"
+                    elif 'Inventory Available' in display_df.columns:
+                        download_label += f", {in_stock_count:,} in stock)"
+                    else:
+                        download_label += ")"
+                    
+                    st.download_button(
+                        label=download_label,
+                        data=csv_buffer.getvalue(),
+                        file_name=filename,
+                        mime="text/csv",
+                        help=f"Download {len(display_df)} products matching current filters with inventory data"
+                    )
+                    
+                    # Enhanced common issues analysis
+                    if validation_filter in ["All Cannabis Products", "Issues Only"] and products_with_issues > 0:
+                        st.markdown("### ⚠️ Issue Analysis")
+                        
+                        # Focus on cannabis products for issue analysis
+                        analysis_df = cannabis_df if validation_filter == "All Cannabis Products" else filtered_df
+                        issues_df = analysis_df[
+                            (analysis_df['Weight_Validation_Issues'].notna()) &
+                            (~analysis_df['Weight_Validation_Issues'].str.contains('Excluded from weight validation', na=False))
+                        ]
+                        
+                        if len(issues_df) > 0:
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                st.write("**🔍 Issue Types:**")
+                                # Count issue types
+                                all_issues = []
+                                for issues_str in issues_df['Weight_Validation_Issues'].dropna():
+                                    all_issues.extend([issue.strip() for issue in str(issues_str).split(';')])
+                                
+                                issue_counts = pd.Series(all_issues).value_counts()
+                                
+                                for issue, count in issue_counts.head(10).items():
+                                    st.write(f"• **{issue}**: {count:,} products")
+                            
+                            with col2:
+                                st.write("**📊 By Category:**")
+                                category_issues = issues_df.groupby('Category').size().sort_values(ascending=False)
+                                for category, count in category_issues.head(10).items():
+                                    st.write(f"• **{category}**: {count:,} issues")
+                else:
+                    st.warning("No products match the selected filters.")
+            
+            tab_index += 1
         
         # TROUBLESHOOTING TAB - FIXING THE EMPTY TAB ISSUE
         if 'troubleshooting_data' in st.session_state:
