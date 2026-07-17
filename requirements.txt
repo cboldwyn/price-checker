@@ -1,8 +1,8 @@
-streamlit
-pandas
-numpy
-plotly
-google-auth
-google-auth-oauthlib
-gspread
-gspread-dataframe
+streamlit==1.50.0
+pandas==2.3.2
+numpy==2.3.3
+plotly==6.3.0
+google-auth==2.40.3
+google-auth-oauthlib==1.2.2
+gspread==6.2.1
+gspread-dataframe==4.0.0
