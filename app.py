@@ -4,6 +4,25 @@ Smart brand matching and price comparison tool for cannabis retail products
 With automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.3.28 (2026-08-13)
+- CRITICAL FIX: Catalog edits in Google Sheets were not reaching the app.
+- ROOT CAUSE: load_google_sheet_data used a bare @st.cache_data with no TTL, so the
+  catalog was cached for the life of the Streamlit Cloud process. The only invalidation
+  was st.cache_data.clear() fired when the status multiselect CHANGES, which never fires
+  on a normal session (the multiselect default already equals the session-state default).
+  A price edited in the sheet was invisible until the app happened to reboot.
+- FIXED: "Load Data" now always re-reads the catalog, so a comparison is always run
+  against the current sheet. This is the real fix; the two below are backstops.
+- FIXED: ttl=300 on load_google_sheet_data, so no other path can hold a catalog
+  for the life of the process.
+- NEW: cache_version argument participates in the cache key, incremented by the refresh
+  button. Deliberately NOT named _cache_version: Streamlit excludes underscore-prefixed
+  arguments from the hash, so an underscored key-buster silently does nothing.
+- NEW: Sidebar "Force Refresh Catalog from Sheets" button for edit-then-check-immediately.
+- NEW: "Catalog fetched" timestamp in the sidebar so staleness is visible, not assumed.
+- HISTORY: this restores work first shipped 2026-05-13 as v4.3.27 and lost when the
+  2026-07-16 remove-committed-secrets pass rewrote history back to v4.3.25.
+
 v4.3.25 (2025-02-02)
 - FEATURE: Added inventory filtering to Weight Validation tab
 - NEW: "Inventory Status" filter with options: All Products, In Stock Only, Out of Stock Only
@@ -160,6 +179,7 @@ import pandas as pd
 import numpy as np
 import io
 import re
+from datetime import datetime
 from google.oauth2.service_account import Credentials
 import gspread
 from gspread_dataframe import get_as_dataframe
@@ -176,8 +196,17 @@ st.set_page_config(
 )
 
 # Version and URLs
-VERSION = "4.3.25"
+VERSION = "4.3.28"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
+
+# How long a fetched catalog stays cached. Without this the catalog is cached for the
+# life of the Streamlit Cloud process, so a price edited in the sheet stays invisible
+# to the price comparison until the app reboots.
+CATALOG_CACHE_TTL_SECONDS = 300
+
+# Wall-clock time of the last REAL Sheets fetch (not a cache hit). Module-level so it
+# survives reruns and is scoped to the same process the cache lives in.
+_CATALOG_FETCH_LOG = {}
 
 # Shop name mapping between Company Products and Product Catalog
 SHOP_NAME_MAPPING = {
@@ -901,16 +930,20 @@ def match_wildcard_template(item_text, template, wildcards=['COLOR', 'STRAIN', '
 # DATA LOADING FUNCTIONS
 # ============================================================================
 
-@st.cache_data
-def load_google_sheet_data(sheet_url, load_all_for_matching=False):
+@st.cache_data(ttl=CATALOG_CACHE_TTL_SECONDS)
+def load_google_sheet_data(sheet_url, load_all_for_matching=False, cache_version=0):
     """
     Load data from Google Sheets using service account authentication
-    
+
     Args:
         sheet_url: Google Sheets URL
         load_all_for_matching: If True, load ALL statuses for matching.
                               If False, load only Active + New Price for price comparison
-    
+        cache_version: Key-buster. Incremented by the sidebar "Force Refresh Catalog"
+                      button to evict this entry. It is a normal (non-underscored)
+                      argument on purpose: Streamlit skips underscore-prefixed args
+                      when hashing, so a "_cache_version" would never bust anything.
+
     Returns:
         tuple: (DataFrame, worksheet_name) or (None, None) if error
     """
@@ -987,10 +1020,13 @@ def load_google_sheet_data(sheet_url, load_all_for_matching=False):
                     df = df[df['Status'].isin(valid_statuses)].copy()
                     st.info(f"📋 Loaded {len(df)} products with valid pricing status (filtered from {original_count})")
             
+            # Stamped only on a real fetch. On a cache hit this function body does not
+            # run, so the timestamp keeps showing when the data actually came off Sheets.
+            _CATALOG_FETCH_LOG['last'] = datetime.now().strftime('%H:%M:%S')
             return df, worksheet.title
         else:
             return None, None
-        
+
     except Exception as e:
         st.error(f"Error loading Google Sheet: {str(e)}")
         return None, None
@@ -2138,7 +2174,24 @@ def main():
         st.sidebar.info(f"✅ Using {catalog_statuses[0]} catalog prices")
     else:
         st.sidebar.info(f"✅ Using {len(catalog_statuses)} statuses: {', '.join(catalog_statuses)}")
-    
+
+    # Catalog freshness controls (v4.3.28)
+    # The catalog is cached for CATALOG_CACHE_TTL_SECONDS. Use this button after editing
+    # the Google Sheet when you want to check the change immediately.
+    st.session_state.setdefault('catalog_cache_version', 0)
+
+    if st.sidebar.button("🔄 Force Refresh Catalog from Sheets"):
+        st.session_state['catalog_cache_version'] += 1
+        load_google_sheet_data.clear()
+        _CATALOG_FETCH_LOG.pop('last', None)
+        st.sidebar.success("Catalog cache cleared. Click Load Data to re-fetch.")
+
+    fetched_at = _CATALOG_FETCH_LOG.get('last')
+    if fetched_at:
+        st.sidebar.caption(f"📅 Catalog fetched: {fetched_at}")
+    else:
+        st.sidebar.caption(f"📅 Catalog not fetched yet this session (auto-refreshes every {CATALOG_CACHE_TTL_SECONDS // 60} min)")
+
     # Add Brand Filtering Option
     st.sidebar.subheader("🏷️ Brand Filtering")
     filter_by_catalog_brands = st.sidebar.checkbox(
@@ -2343,8 +2396,17 @@ def main():
             connect_catalog_df = None
             if google_sheets_available:
                 st.info(f"📊 Loading Connect Product Catalog...")
+                # Always re-read the sheet on an explicit Load Data click. A price
+                # comparison is only meaningful against the CURRENT catalog, and the
+                # read costs a couple of seconds against a CSV pass that costs more.
+                # The TTL and the refresh button are backstops for every other path.
+                load_google_sheet_data.clear()
                 # Load ALL statuses for matching purposes
-                catalog_df, catalog_ws_name = load_google_sheet_data(CONNECT_CATALOG_URL, load_all_for_matching=True)
+                catalog_df, catalog_ws_name = load_google_sheet_data(
+                    CONNECT_CATALOG_URL,
+                    load_all_for_matching=True,
+                    cache_version=st.session_state.get('catalog_cache_version', 0)
+                )
                 if catalog_df is not None:
                     connect_catalog_df = catalog_df
                     st.session_state['df_catalog'] = connect_catalog_df
