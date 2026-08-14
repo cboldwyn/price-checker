@@ -4,6 +4,19 @@ Smart brand matching and price comparison tool for cannabis retail products
 With automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.3.30 (2026-08-13)
+- RECOVERED: the substance of v4.3.26, which had been missing from production since
+  2026-07-16. Its commit still existed on GitHub as an unreachable object and was
+  fetched back by SHA.
+- CRITICAL FIX: brand filtering is case-insensitive again. The exact-match .isin() that
+  production reverted to drops an ENTIRE brand from the comparison whenever Blaze casing
+  differs from the catalog, silently. "EZ Splitz" is the known casualty. Any brand that
+  went missing from a price check between 07-16 and now is explained by this.
+- NEW: a warning naming every brand filtered out as not-in-catalog, so that class of
+  drop is visible instead of silent.
+- FIXED: Turn AIO products match "turnone Up/turnone Down" templates again, in both
+  match_placeholder_pattern and match_wildcard_template.
+
 v4.3.29 (2026-08-13)
 - CLEANUP: Load Data output trimmed from ~26 running status messages to one summary line
   plus a collapsible "Match strategy and load detail" expander.
@@ -207,13 +220,13 @@ from gspread_dataframe import get_as_dataframe
 
 # Page configuration
 st.set_page_config(
-    page_title="Product Price Checker v4.3.25",
+    page_title="Product Price Checker v4.3.30",
     page_icon="🛒",
     layout="wide"
 )
 
 # Version and URLs
-VERSION = "4.3.29"
+VERSION = "4.3.30"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # How long a fetched catalog stays cached. Without this the catalog is cached for the
@@ -861,7 +874,15 @@ def match_placeholder_pattern(product_name, template_name):
             template_upper = template_upper.replace("TURN UP/TURN DOWN", "TURN UP")
         elif "TURN DOWN" in product_upper:
             template_upper = template_upper.replace("TURN UP/TURN DOWN", "TURN DOWN")
-    
+
+    # SPECIAL HANDLING FOR "turnone Up/turnone Down" PATTERN (v4.3.26)
+    # AIO templates with "/" options, e.g. "Turn - STRAIN turnone Up/turnone Down AIO 1g"
+    if "TURNONE UP/TURNONE DOWN" in template_upper and "TURNONE" in product_upper:
+        if "TURNONE UP" in product_upper:
+            template_upper = template_upper.replace("TURNONE UP/TURNONE DOWN", "TURNONE UP")
+        elif "TURNONE DOWN" in product_upper:
+            template_upper = template_upper.replace("TURNONE UP/TURNONE DOWN", "TURNONE DOWN")
+
     # SPECIAL HANDLING FOR STIIIZY STRAIN PATTERNS (v4.3.7)
     # Template: "Stiiizy - STRAIN Black Bag 3.5g" 
     # Product:  "Stiiizy - Black Bag Black Cherry 3.5g"
@@ -927,7 +948,25 @@ def match_wildcard_template(item_text, template, wildcards=['COLOR', 'STRAIN', '
     
     item_str = str(item_text).strip()
     template_str = str(template).strip()
-    
+
+    # Normalize "/" variant patterns before regex matching (v4.3.26). Templates like
+    # "Turn Up/Turn Down" or "turnone Up/turnone Down" must resolve to the single
+    # variant present in the product name, or re.escape turns the slash into a literal.
+    item_upper = item_str.upper()
+    template_upper_check = template_str.upper()
+
+    if "TURN UP/TURN DOWN" in template_upper_check and "TURN" in item_upper:
+        if "TURN UP" in item_upper:
+            template_str = re.sub(r'(?i)Turn Up/Turn Down', 'Turn Up', template_str)
+        elif "TURN DOWN" in item_upper:
+            template_str = re.sub(r'(?i)Turn Up/Turn Down', 'Turn Down', template_str)
+
+    if "TURNONE UP/TURNONE DOWN" in template_upper_check and "TURNONE" in item_upper:
+        if "TURNONE UP" in item_upper:
+            template_str = re.sub(r'(?i)turnone Up/turnone Down', 'turnone Up', template_str)
+        elif "TURNONE DOWN" in item_upper:
+            template_str = re.sub(r'(?i)turnone Up/turnone Down', 'turnone Down', template_str)
+
     # Find all wildcard positions in template
     wildcard_positions = {}
     for wildcard in wildcards:
@@ -1229,18 +1268,32 @@ def filter_company_products(df, connect_catalog_df=None, selected_shop=None, csv
         filtered_df = filtered_df.drop(columns=columns_to_remove)
         pipeline_log(f"🧹 Removed .5 price columns from display")
     
-    # Filter by valid brands from catalog
+    # Filter by valid brands from catalog (case-insensitive)
     if connect_catalog_df is not None and not connect_catalog_df.empty and 'Brand' in filtered_df.columns:
         if 'Brand' in connect_catalog_df.columns:
             valid_brands = connect_catalog_df['Brand'].dropna().unique()
             valid_brands = [str(brand).strip() for brand in valid_brands if str(brand).strip() and str(brand) != 'nan']
-            
+
+            # Case-insensitive lookup: lowercase -> original catalog brand name. An exact
+            # .isin() drops a whole brand from the comparison whenever Blaze casing differs
+            # from the catalog, silently, which is how "EZ Splitz" went missing.
+            brand_lookup = {str(brand).strip().lower(): str(brand).strip() for brand in valid_brands}
+
             before_brand_filter = len(filtered_df)
-            filtered_df = filtered_df[filtered_df['Brand'].isin(valid_brands)]
+
+            csv_brands_lower = filtered_df['Brand'].astype(str).str.strip().str.lower()
+            brand_mask = csv_brands_lower.isin(brand_lookup.keys())
+
+            # Which brands got dropped, so a silent drop becomes a visible one
+            rejected_brands = filtered_df.loc[~brand_mask, 'Brand'].dropna().unique()
+            rejected_brands = [str(b).strip() for b in rejected_brands if str(b).strip() and str(b).lower() != 'nan']
+
+            filtered_df = filtered_df[brand_mask]
             after_brand_filter = len(filtered_df)
-            
-            st.write(f"**After brand filtering**: {filtered_df.shape}")
+
             pipeline_log(f"🎯 Filtered to only include {len(valid_brands)} brands from Product Catalog. Removed {before_brand_filter - after_brand_filter} products.")
+            if rejected_brands:
+                st.warning(f"⚠️ Brands not in catalog (filtered out): {', '.join(sorted(set(rejected_brands)))}")
     
     # Add data source identifier
     filtered_df['Data_Source'] = csv_type.title()
