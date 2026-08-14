@@ -4,6 +4,23 @@ Smart brand matching and price comparison tool for cannabis retail products
 With automatic CSV type detection, shop filtering, and Blaze POS export
 
 CHANGELOG:
+v4.3.29 (2026-08-13)
+- CLEANUP: Load Data output trimmed from ~26 running status messages to one summary line
+  plus a collapsible "Match strategy and load detail" expander.
+- The summary leads with the number that decides whether to act: price differences found.
+  It renders as a warning when there are any and a success when there are none, and it
+  carries product count, catalog record count, and the catalog read time.
+- Warnings and errors still render INLINE and were deliberately left alone (missing
+  columns, unmapped shops, cost overruns, no matched products). Only routine progress
+  chatter moved into the expander.
+- The match-strategy metric row and the weight-validation metric row moved into the
+  expander instead of interrupting the load.
+- Pipeline log lives in session_state, not a module global: this app is served from a
+  public Streamlit URL, so one process handles several users and a module-level list
+  would interleave their runs.
+- HISTORY: rebuilt from scratch rather than recovered. The original trim shipped
+  2026-05-13 in v4.3.27 and was lost with that commit.
+
 v4.3.28 (2026-08-13)
 - CRITICAL FIX: Catalog edits in Google Sheets were not reaching the app.
 - ROOT CAUSE: load_google_sheet_data used a bare @st.cache_data with no TTL, so the
@@ -196,7 +213,7 @@ st.set_page_config(
 )
 
 # Version and URLs
-VERSION = "4.3.28"
+VERSION = "4.3.29"
 CONNECT_CATALOG_URL = "https://docs.google.com/spreadsheets/d/1FG3K7Rj-a9xw-UegJ4yxM8DAyn1LhmxwopYn67ja5iI/edit?gid=172177068#gid=172177068"
 
 # How long a fetched catalog stays cached. Without this the catalog is cached for the
@@ -207,6 +224,26 @@ CATALOG_CACHE_TTL_SECONDS = 300
 # Wall-clock time of the last REAL Sheets fetch (not a cache hit). Module-level so it
 # survives reruns and is scoped to the same process the cache lives in.
 _CATALOG_FETCH_LOG = {}
+
+# Routine step-by-step chatter from the Load Data pipeline. Collected instead of printed
+# to the page, then shown once under a collapsible expander. Anything the user has to ACT
+# on (a warning or an error) still renders inline, on purpose.
+#
+# Kept in session_state, NOT module-level: this app is served from a public Streamlit URL,
+# so one process handles several users at once and a module-level list would interleave
+# their runs. _CATALOG_FETCH_LOG above is module-level on purpose, because the cache it
+# reports on is genuinely process-wide.
+PIPELINE_LOG_KEY = 'pipeline_log'
+
+
+def pipeline_log(message):
+    """Record a routine pipeline step for the post-load detail expander."""
+    st.session_state.setdefault(PIPELINE_LOG_KEY, []).append(str(message))
+
+
+def pipeline_log_reset():
+    """Clear the pipeline log at the start of a Load Data run."""
+    st.session_state[PIPELINE_LOG_KEY] = []
 
 # Shop name mapping between Company Products and Product Catalog
 SHOP_NAME_MAPPING = {
@@ -424,7 +461,7 @@ def add_weight_validation(df):
     if df is None or df.empty:
         return df
     
-    st.info("⚖️ Adding weight validation analysis...")
+    pipeline_log("⚖️ Adding weight validation analysis...")
     
     # EXCLUDE non-cannabis categories from weight validation
     cannabis_df = df[~df['Category'].isin(WEIGHT_VALIDATION_EXCLUDED_CATEGORIES)].copy() if 'Category' in df.columns else df.copy()
@@ -432,7 +469,7 @@ def add_weight_validation(df):
     
     if excluded_count > 0:
         excluded_categories = df[df['Category'].isin(WEIGHT_VALIDATION_EXCLUDED_CATEGORIES)]['Category'].unique()
-        st.info(f"🚫 Excluded {excluded_count:,} non-cannabis products from weight validation ({', '.join(excluded_categories)})")
+        pipeline_log(f"🚫 Excluded {excluded_count:,} non-cannabis products from weight validation ({', '.join(excluded_categories)})")
     
     # Initialize validation columns for ALL products (including excluded ones)
     df['Product_Name_Weight_Grams'] = None
@@ -505,20 +542,19 @@ def add_weight_validation(df):
             df.at[idx, 'Weight_Validation_Issues'] = '; '.join(issues)
             validation_issues += 1
     
-    # Report results (only for cannabis products)
+    # Report results (only for cannabis products). Stashed for the post-load expander
+    # rather than drawn here, so Load Data stays a single summary line.
     cannabis_products = len(cannabis_df)
-    st.success(f"⚖️ Weight validation complete!")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Cannabis Products", f"{cannabis_products:,}")
-    with col2:
-        st.metric("Weight Matches", f"{weight_matches:,}")
-    with col3:
-        st.metric("Validation Issues", f"{validation_issues:,}")
-    with col4:
-        st.metric("Invalid Category Options", f"{invalid_category_options:,}")
-    
+    st.session_state['weight_validation_counts'] = {
+        'cannabis_products': cannabis_products,
+        'weight_matches': weight_matches,
+        'validation_issues': validation_issues,
+        'invalid_category_options': invalid_category_options,
+    }
+    pipeline_log(
+        f"⚖️ Weight validation: {validation_issues:,} issues across {cannabis_products:,} cannabis products"
+    )
+
     return df
 
 def detect_csv_type(df):
@@ -1013,12 +1049,12 @@ def load_google_sheet_data(sheet_url, load_all_for_matching=False, cache_version
                 
                 if load_all_for_matching:
                     # For matching: Load ALL statuses
-                    st.info(f"📋 Loaded {len(df)} products (ALL statuses) for matching")
+                    pipeline_log(f"📋 Loaded {len(df)} products (ALL statuses) for matching")
                 else:
                     # For price display: Only Active + New Price
                     valid_statuses = ['Active', 'New Price']
                     df = df[df['Status'].isin(valid_statuses)].copy()
-                    st.info(f"📋 Loaded {len(df)} products with valid pricing status (filtered from {original_count})")
+                    pipeline_log(f"📋 Loaded {len(df)} products with valid pricing status (filtered from {original_count})")
             
             # Stamped only on a real fetch. On a cache hit this function body does not
             # run, so the timestamp keeps showing when the data actually came off Sheets.
@@ -1078,7 +1114,7 @@ def filter_company_products(df, connect_catalog_df=None, selected_shop=None, csv
             df = df[df['Shop'] == selected_shop].copy()
             after_shop_filter = len(df)
             st.write(f"**After filtering to '{selected_shop}'**: {df.shape}")
-            st.info(f"🏪 Filtered to {selected_shop}: {after_shop_filter:,} products (removed {before_shop_filter - after_shop_filter:,})")
+            pipeline_log(f"🏪 Filtered to {selected_shop}: {after_shop_filter:,} products (removed {before_shop_filter - after_shop_filter:,})")
     
     # Filter by Active status
     if 'Active' in df.columns:
@@ -1097,7 +1133,7 @@ def filter_company_products(df, connect_catalog_df=None, selected_shop=None, csv
         removed_count = before_category_filter - after_category_filter
         st.write(f"**After excluding unwanted categories**: {active_df.shape}")
         if removed_count > 0:
-            st.info(f"🚫 Excluded {removed_count} products from categories: {', '.join(EXCLUDED_CATEGORIES)}")
+            pipeline_log(f"🚫 Excluded {removed_count} products from categories: {', '.join(EXCLUDED_CATEGORIES)}")
     
     # Keep only essential columns
     columns_to_keep = [
@@ -1122,11 +1158,11 @@ def filter_company_products(df, connect_catalog_df=None, selected_shop=None, csv
     # This ensures we have columns to copy the fallback values into
     if 'Unit Price' not in filtered_df.columns:
         filtered_df['Unit Price'] = None
-        st.info("📝 Created Unit Price column for fallback values")
+        pipeline_log("📝 Created Unit Price column for fallback values")
     
     if 'Unit Sale Price' not in filtered_df.columns:
         filtered_df['Unit Sale Price'] = None  
-        st.info("📝 Created Unit Sale Price column for fallback values")
+        pipeline_log("📝 Created Unit Sale Price column for fallback values")
     
     # Use .5 price fields as fallback when standard price fields are blank (v4.3.9)
     if '.5 Unit Price' in filtered_df.columns:
@@ -1142,7 +1178,7 @@ def filter_company_products(df, connect_catalog_df=None, selected_shop=None, csv
         fallback_count = (unit_price_is_empty & filtered_df['.5 Unit Price'].notna()).sum()
         if fallback_count > 0:
             filtered_df.loc[unit_price_is_empty, 'Unit Price'] = filtered_df.loc[unit_price_is_empty, '.5 Unit Price']
-            st.success(f"✅ Applied .5 Unit Price values to {fallback_count:,} products")
+            pipeline_log(f"✅ Applied .5 Unit Price values to {fallback_count:,} products")
     
     if '.5 Unit Sale Price' in filtered_df.columns:
         # Check where Unit Sale Price is None/NaN or empty  
@@ -1157,7 +1193,7 @@ def filter_company_products(df, connect_catalog_df=None, selected_shop=None, csv
         fallback_count = (sale_price_is_empty & filtered_df['.5 Unit Sale Price'].notna()).sum()
         if fallback_count > 0:
             filtered_df.loc[sale_price_is_empty, 'Unit Sale Price'] = filtered_df.loc[sale_price_is_empty, '.5 Unit Sale Price']
-            st.success(f"✅ Applied .5 Unit Sale Price values to {fallback_count:,} products")
+            pipeline_log(f"✅ Applied .5 Unit Sale Price values to {fallback_count:,} products")
     
     # NOW normalize price columns to ensure consistent display
     # Fixes issue where mixed formats like '49.98' and '$49.98' caused display problems
@@ -1191,7 +1227,7 @@ def filter_company_products(df, connect_catalog_df=None, selected_shop=None, csv
     
     if columns_to_remove:
         filtered_df = filtered_df.drop(columns=columns_to_remove)
-        st.info(f"🧹 Removed .5 price columns from display")
+        pipeline_log(f"🧹 Removed .5 price columns from display")
     
     # Filter by valid brands from catalog
     if connect_catalog_df is not None and not connect_catalog_df.empty and 'Brand' in filtered_df.columns:
@@ -1204,13 +1240,13 @@ def filter_company_products(df, connect_catalog_df=None, selected_shop=None, csv
             after_brand_filter = len(filtered_df)
             
             st.write(f"**After brand filtering**: {filtered_df.shape}")
-            st.info(f"🎯 Filtered to only include {len(valid_brands)} brands from Product Catalog. Removed {before_brand_filter - after_brand_filter} products.")
+            pipeline_log(f"🎯 Filtered to only include {len(valid_brands)} brands from Product Catalog. Removed {before_brand_filter - after_brand_filter} products.")
     
     # Add data source identifier
     filtered_df['Data_Source'] = csv_type.title()
     
     # Extract enhanced matching data
-    st.info("🔍 Extracting Weight, Pack Size, and Category Keywords for enhanced matching...")
+    pipeline_log("🔍 Extracting Weight, Pack Size, and Category Keywords for enhanced matching...")
     filtered_df['Extracted_Weight'] = filtered_df['Item'].apply(extract_weight_from_item)
     filtered_df['Extracted_Pack_Size'] = filtered_df['Item'].apply(extract_pack_size_from_item)
     filtered_df['Extracted_Category_Keywords'] = filtered_df.apply(
@@ -1222,9 +1258,9 @@ def filter_company_products(df, connect_catalog_df=None, selected_shop=None, csv
     pack_extracted_count = filtered_df['Extracted_Pack_Size'].notna().sum()
     keywords_extracted_count = filtered_df['Extracted_Category_Keywords'].notna().sum()
     
-    st.info(f"🔍 Extracted weights from {weight_extracted_count:,} products")
-    st.info(f"📦 Extracted pack sizes from {pack_extracted_count:,} products")
-    st.info(f"🔤 Extracted category keywords from {keywords_extracted_count:,} products")
+    pipeline_log(f"🔍 Extracted weights from {weight_extracted_count:,} products")
+    pipeline_log(f"📦 Extracted pack sizes from {pack_extracted_count:,} products")
+    pipeline_log(f"🔤 Extracted category keywords from {keywords_extracted_count:,} products")
     
     # Show keyword extraction breakdown by category
     if keywords_extracted_count > 0:
@@ -1271,14 +1307,14 @@ def add_catalog_location_mapping(df, csv_type='company', selected_shop=None):
         
         mapped_count = df_copy['Catalog_Location'].notna().sum()
         total_count = len(df_copy)
-        st.info(f"✅ Shop mapping: {mapped_count}/{total_count} products mapped to catalog locations")
+        pipeline_log(f"✅ Shop mapping: {mapped_count}/{total_count} products mapped to catalog locations")
     
     elif csv_type == 'shop':
         # For shop exports, use the selected shop name for mapping
         if selected_shop and selected_shop in SHOP_NAME_MAPPING:
             catalog_location = SHOP_NAME_MAPPING[selected_shop]
             df_copy['Catalog_Location'] = catalog_location
-            st.info(f"✅ Mapped all {len(df_copy):,} products to catalog location: {catalog_location}")
+            pipeline_log(f"✅ Mapped all {len(df_copy):,} products to catalog location: {catalog_location}")
         else:
             st.warning(f"⚠️ Cannot map shop '{selected_shop}' to catalog location")
     
@@ -1313,10 +1349,10 @@ def normalize_categories(df):
         if old_cat in original_categories:
             count = original_categories[old_cat]
             normalized_count += count
-            st.info(f"📂 Normalized {count:,} products: '{old_cat}' → '{new_cat}'")
+            pipeline_log(f"📂 Normalized {count:,} products: '{old_cat}' → '{new_cat}'")
     
     if normalized_count > 0:
-        st.success(f"✅ Category normalization: {normalized_count:,} products updated")
+        pipeline_log(f"✅ Category normalization: {normalized_count:,} products updated")
     
     return df_copy
 
@@ -1329,7 +1365,7 @@ def add_smart_brand_matching(company_df, catalog_df):
     if company_df is None or catalog_df is None:
         return company_df
     
-    st.info("🧠 Starting smart brand structure matching...")
+    pipeline_log("🧠 Starting smart brand structure matching...")
     
     matched_df = company_df.copy()
     matched_df['Catalog_Match_Found'] = False
@@ -1681,32 +1717,26 @@ def add_smart_brand_matching(company_df, catalog_df):
     total_matches = exact_matches + wildcard_matches + single_entry_matches + brand_category_matches + flower_weight_matches + preroll_matches + vape_extract_matches + apparel_matches
     total_match_rate = (total_matches / len(matched_df)) * 100 if len(matched_df) > 0 else 0
     
-    st.success(f"🎉 Enhanced Matching Results:")
-    
     # Count placeholder pattern matches separately
     placeholder_pattern_count = matched_df[matched_df['Match_Type'] == 'placeholder_pattern'].shape[0]
     exact_only_count = exact_matches - placeholder_pattern_count
-    
-    col1, col2, col3, col4, col5, col6, col7, col8, col9 = st.columns(9)
-    with col1:
-        st.metric("🎯 Exact", f"{exact_only_count:,}")
-    with col2:
-        st.metric("🔤 Pattern", f"{placeholder_pattern_count:,}", help="COLOR, STRAIN, FLAVOR placeholders")
-    with col3:
-        st.metric("1️⃣ Single", f"{single_entry_matches:,}")
-    with col4:
-        st.metric("📂 Category", f"{brand_category_matches:,}")
-    with col5:
-        st.metric("🌸 Flower", f"{flower_weight_matches:,}")
-    with col6:
-        st.metric("🚬 Preroll", f"{preroll_matches:,}")
-    with col7:
-        st.metric("💨 Vape/Ext", f"{vape_extract_matches:,}")
-    with col8:
-        st.metric("👕 Apparel", f"{apparel_matches:,}")
-    with col9:
-        st.metric("📊 Total", f"{total_matches:,} ({total_match_rate:.1f}%)")
-    
+
+    # Stashed rather than rendered here. main() draws this as a metric row inside the
+    # post-load detail expander, so the Load Data flow stays a single summary line.
+    st.session_state['match_strategy_counts'] = {
+        'exact': exact_only_count,
+        'pattern': placeholder_pattern_count,
+        'single': single_entry_matches,
+        'category': brand_category_matches,
+        'flower': flower_weight_matches,
+        'preroll': preroll_matches,
+        'vape_extract': vape_extract_matches,
+        'apparel': apparel_matches,
+        'total': total_matches,
+        'rate': total_match_rate,
+    }
+    pipeline_log(f"🧠 Matched {total_matches:,} of {len(matched_df):,} products ({total_match_rate:.1f}%)")
+
     # Store troubleshooting data in session state
     st.session_state['troubleshooting_data'] = pd.DataFrame(troubleshooting_data)
     
@@ -2005,14 +2035,14 @@ def add_simple_price_comparison(company_df, catalog_df, selected_statuses=['Acti
         st.warning("⚠️ No matched products found for price comparison")
         return company_df
     
-    st.info(f"💰 Adding price comparison for {len(matched_products):,} matched products...")
+    pipeline_log(f"💰 Adding price comparison for {len(matched_products):,} matched products...")
     
     # Format status list for display
     if len(selected_statuses) == 1:
         status_display = f"**{selected_statuses[0]}**"
     else:
         status_display = f"**{', '.join(selected_statuses)}**"
-    st.info(f"📅 Using prices from catalog statuses: {status_display}")
+    pipeline_log(f"📅 Using prices from catalog statuses: {status_display}")
     
     # Initialize price comparison columns
     company_df['Catalog_Retail_Price'] = None
@@ -2028,7 +2058,7 @@ def add_simple_price_comparison(company_df, catalog_df, selected_statuses=['Acti
     # Build catalog lookup - filter by selected statuses
     catalog_for_pricing = catalog_df[catalog_df['Status'].isin(selected_statuses)].copy() if 'Status' in catalog_df.columns else catalog_df
     
-    st.info(f"🔍 {len(catalog_for_pricing)} catalog products have selected status(es) for pricing")
+    pipeline_log(f"🔍 {len(catalog_for_pricing)} catalog products have selected status(es) for pricing")
     
     catalog_lookup = {}
     for _, cat_row in catalog_for_pricing.iterrows():
@@ -2135,11 +2165,18 @@ def add_simple_price_comparison(company_df, catalog_df, selected_statuses=['Acti
         status_list = ', '.join([f"'{s}'" for s in selected_statuses])
         st.warning(f"⚠️ {matched_but_no_pricing} matched products don't have any of the selected statuses ({status_list})")
     
-    st.success(f"💰 Price comparison complete! Found {pricing_issues:,} products with price differences > $0.01")
-    
+    pipeline_log(f"💰 Price comparison complete! Found {pricing_issues:,} products with price differences > $0.01")
+
+    # Headline numbers for the post-load summary line.
+    st.session_state['price_comparison_summary'] = {
+        'pricing_issues': pricing_issues,
+        'cost_issues': cost_issues,
+        'compared': len(matched_products),
+    }
+
     if cost_issues > 0:
         st.warning(f"⚠️ Found {cost_issues:,} products where Cost per Unit exceeds Max Unit Cost")
-    
+
     return company_df
 
 # ============================================================================
@@ -2391,11 +2428,15 @@ def main():
     
     if st.sidebar.button("🚀 Load Data", type="primary", disabled=(uploaded_file is None or st.session_state['csv_type'] is None or st.session_state['selected_shop'] is None)):
         with st.spinner("Loading data from all sources..."):
-            
+            pipeline_log_reset()
+            st.session_state.pop('match_strategy_counts', None)
+            st.session_state.pop('price_comparison_summary', None)
+            st.session_state.pop('weight_validation_counts', None)
+
             # Load Product Catalog with ALL statuses for matching
             connect_catalog_df = None
             if google_sheets_available:
-                st.info(f"📊 Loading Connect Product Catalog...")
+                pipeline_log("📊 Loading Connect Product Catalog...")
                 # Always re-read the sheet on an explicit Load Data click. A price
                 # comparison is only meaningful against the CURRENT catalog, and the
                 # read costs a couple of seconds against a CSV pass that costs more.
@@ -2412,7 +2453,7 @@ def main():
                     st.session_state['df_catalog'] = connect_catalog_df
                     st.session_state['df_catalog_name'] = f"Connect Product Catalog ({catalog_ws_name})"
                     st.session_state['df_catalog_statuses'] = catalog_statuses
-                    st.success(f"✅ Loaded Product Catalog: {connect_catalog_df.shape[0]} records (all statuses for matching)")
+                    pipeline_log(f"✅ Loaded Product Catalog: {connect_catalog_df.shape[0]} records (all statuses for matching)")
                 else:
                     st.error("❌ Failed to load Connect Product Catalog")
             
@@ -2422,7 +2463,7 @@ def main():
                 csv_type = st.session_state['csv_type']
                 selected_shop = st.session_state.get('selected_shop')
                 
-                st.info(f"📄 Processing {csv_type.upper()} CSV...")
+                pipeline_log(f"📄 Processing {csv_type.upper()} CSV...")
                 df_csv, csv_name = load_csv_data(uploaded_file)
                 if df_csv is not None:
                     filtered_csv = filter_company_products(
@@ -2453,21 +2494,79 @@ def main():
                         elif csv_type == 'shop' and selected_shop:
                             csv_display_name += f" - {selected_shop}"
                         st.session_state['df_csv_name'] = csv_display_name
-                        st.success(f"✅ Processed {csv_display_name}: {filtered_csv.shape[0]} products after filtering, matching, and price comparison")
+                        pipeline_log(f"✅ Processed {csv_display_name}: {filtered_csv.shape[0]} products after filtering, matching, and price comparison")
                     else:
                         st.error("❌ Failed to process Products CSV")
                 else:
                     st.error("❌ Failed to load Products CSV")
             
-            # Summary
+            # Summary. One line carrying the numbers that decide whether to act, with
+            # the step-by-step detail folded into an expander underneath.
             loaded_sources = 0
             if connect_catalog_df is not None:
                 loaded_sources += 1
             if filtered_csv is not None:
                 loaded_sources += 1
-            
+
             if loaded_sources > 0:
-                st.success(f"🎉 Successfully loaded {loaded_sources} data source(s)!")
+                price_summary = st.session_state.get('price_comparison_summary') or {}
+                pricing_issues = price_summary.get('pricing_issues')
+                cost_issues = price_summary.get('cost_issues', 0)
+
+                headline_parts = []
+                if filtered_csv is not None:
+                    headline_parts.append(f"{filtered_csv.shape[0]:,} products")
+                if connect_catalog_df is not None:
+                    headline_parts.append(f"{connect_catalog_df.shape[0]:,} catalog records")
+                if _CATALOG_FETCH_LOG.get('last'):
+                    headline_parts.append(f"catalog read {_CATALOG_FETCH_LOG['last']}")
+                headline = " · ".join(headline_parts)
+
+                if pricing_issues:
+                    st.warning(f"💰 **{pricing_issues:,} price differences** to review  ·  {headline}")
+                elif pricing_issues == 0:
+                    st.success(f"✅ No price differences over $0.01  ·  {headline}")
+                else:
+                    st.success(f"✅ Loaded  ·  {headline}")
+
+                if cost_issues:
+                    st.caption(f"Plus {cost_issues:,} products where Cost per Unit exceeds Max Unit Cost.")
+
+                with st.expander("🔎 Match strategy and load detail"):
+                    counts = st.session_state.get('match_strategy_counts')
+                    if counts:
+                        cols = st.columns(9)
+                        metrics = [
+                            ("🎯 Exact", f"{counts['exact']:,}", None),
+                            ("🔤 Pattern", f"{counts['pattern']:,}", "COLOR, STRAIN, FLAVOR placeholders"),
+                            ("1️⃣ Single", f"{counts['single']:,}", None),
+                            ("📂 Category", f"{counts['category']:,}", None),
+                            ("🌸 Flower", f"{counts['flower']:,}", None),
+                            ("🚬 Preroll", f"{counts['preroll']:,}", None),
+                            ("💨 Vape/Ext", f"{counts['vape_extract']:,}", None),
+                            ("👕 Apparel", f"{counts['apparel']:,}", None),
+                            ("📊 Total", f"{counts['total']:,} ({counts['rate']:.1f}%)", None),
+                        ]
+                        for col, (label, value, help_text) in zip(cols, metrics):
+                            with col:
+                                st.metric(label, value, help=help_text)
+                        st.markdown("---")
+
+                    weights = st.session_state.get('weight_validation_counts')
+                    if weights:
+                        wcols = st.columns(4)
+                        with wcols[0]:
+                            st.metric("Cannabis Products", f"{weights['cannabis_products']:,}")
+                        with wcols[1]:
+                            st.metric("Weight Matches", f"{weights['weight_matches']:,}")
+                        with wcols[2]:
+                            st.metric("Validation Issues", f"{weights['validation_issues']:,}")
+                        with wcols[3]:
+                            st.metric("Invalid Category Options", f"{weights['invalid_category_options']:,}")
+                        st.markdown("---")
+
+                    for entry in st.session_state.get(PIPELINE_LOG_KEY, []):
+                        st.markdown(f"- {entry}")
             else:
                 st.error("❌ No data could be loaded. Check your files/URLs and permissions.")
     
